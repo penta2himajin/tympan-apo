@@ -1,0 +1,47 @@
+[package]
+name = "tympan-apo"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/penta2himajin/tympan-apo"
+description = "Rust framework for Windows Audio Processing Objects (APOs)"
+readme = "README.md"
+keywords = ["audio", "windows", "apo", "com", "realtime"]
+categories = ["multimedia::audio", "os::windows-apis"]
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+aec = []
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_Media_Audio",
+    "Win32_Media_KernelStreaming",
+    "Win32_UI_Shell_PropertiesSystem",
+]
+
+[target.'cfg(windows)'.dependencies.windows-core]
+version = "0.62"
+
+[dependencies]
+crossbeam-utils = { version = "0.8", default-features = false }
+
+[dev-dependencies]
+static_assertions = "1.1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
+
+[profile.dev]
+panic = "abort"
