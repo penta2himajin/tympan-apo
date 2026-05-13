@@ -63,7 +63,7 @@ jobs:
             Write-Error "::error::Expected DLL not found at $env:TYMPAN_PASSTHROUGH_DLL"
             exit 1
           }
-          cargo test --release --target x86_64-pc-windows-msvc --test tier3_lifecycle -- --nocapture
+          cargo test --release --target x86_64-pc-windows-msvc --test tier3_lifecycle -- --ignored --nocapture
 
       - name: Run realtime-safety test (rlib path under assert_no_alloc)
         # Debug profile so the assert_no_alloc cfg gate is active.

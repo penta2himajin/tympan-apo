@@ -143,6 +143,8 @@ fn descriptor(
 }
 
 #[test]
+#[ignore = "requires TYMPAN_PASSTHROUGH_DLL pointing at the built passthrough cdylib; \
+            opt in via `cargo test --test tier3_lifecycle -- --ignored` (Tier 3 CI does this)"]
 fn passthrough_dll_drives_full_lifecycle() {
     let (_module_guard, dll_get_class_object) = load_passthrough();
 
