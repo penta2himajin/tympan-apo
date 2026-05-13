@@ -15,4 +15,5 @@
 //! this stage of the implementation but exported unmangled so that
 //! Tier 2 `dumpbin /exports` verification can already run.
 
+pub mod class_factory;
 pub mod exports;
