@@ -27,15 +27,18 @@ use alloc::sync::Arc;
 
 use windows::Win32::Media::Audio::Apo::{
     IAudioMediaType, IAudioProcessingObject, IAudioProcessingObjectConfiguration,
-    IAudioProcessingObjectConfiguration_Impl, IAudioProcessingObject_Impl,
-    APO_CONNECTION_DESCRIPTOR, APO_REG_PROPERTIES,
+    IAudioProcessingObjectConfiguration_Impl, IAudioProcessingObjectRT,
+    IAudioProcessingObjectRT_Impl, IAudioProcessingObject_Impl, APO_CONNECTION_DESCRIPTOR,
+    APO_CONNECTION_PROPERTY, APO_REG_PROPERTIES,
 };
 use windows_core::{implement, Ref, HRESULT};
 
-use crate::buffer::CONNECTION_PROPERTY_SIGNATURE;
+use crate::apo::ProcessInput;
+use crate::buffer::{BufferFlags, CONNECTION_PROPERTY_SIGNATURE};
 use crate::error::HResult;
 use crate::format::Format;
 use crate::instance::AnyApoInstance;
+use crate::realtime::RealtimeContext;
 
 /// COM-side carrier for an [`Arc<dyn AnyApoInstance>`](AnyApoInstance).
 ///
@@ -44,7 +47,11 @@ use crate::instance::AnyApoInstance;
 /// `IAudioProcessingObject*`; methods on the COM interface route
 /// through this struct into the user's `ProcessingObject` via the
 /// type-erased trait.
-#[implement(IAudioProcessingObject, IAudioProcessingObjectConfiguration)]
+#[implement(
+    IAudioProcessingObject,
+    IAudioProcessingObjectConfiguration,
+    IAudioProcessingObjectRT
+)]
 pub struct ApoInstanceCom {
     instance: Arc<dyn AnyApoInstance>,
 }
@@ -242,6 +249,128 @@ impl IAudioProcessingObjectConfiguration_Impl for ApoInstanceCom_Impl {
                 "ProcessingObject::unlock_for_process failed",
             )
         })
+    }
+}
+
+impl IAudioProcessingObjectRT_Impl for ApoInstanceCom_Impl {
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
+    fn APOProcess(
+        &self,
+        u32numinputconnections: u32,
+        ppinputconnections: *const *const APO_CONNECTION_PROPERTY,
+        u32numoutputconnections: u32,
+        ppoutputconnections: *mut *mut APO_CONNECTION_PROPERTY,
+    ) {
+        // Defensive: write SILENT output and bail without
+        // panicking if any precondition fails. APOProcess returns
+        // no HRESULT — there is nowhere to report errors — so the
+        // sole graceful degradation is to emit silence.
+        let mark_output_silent = |frame_count: u32| {
+            if u32numoutputconnections == 1 && !ppoutputconnections.is_null() {
+                // Safety: count is 1 and pointer is non-null.
+                let out_ptr = unsafe { *ppoutputconnections };
+                if !out_ptr.is_null() {
+                    // Safety: COM caller's APO_CONNECTION_PROPERTY*
+                    // points to a writable slot.
+                    unsafe {
+                        (*out_ptr).u32ValidFrameCount = frame_count;
+                        (*out_ptr).u32BufferFlags =
+                            windows::Win32::Media::Audio::Apo::BUFFER_SILENT;
+                    }
+                }
+            }
+        };
+
+        if u32numinputconnections != 1 || u32numoutputconnections != 1 {
+            mark_output_silent(0);
+            return;
+        }
+        if ppinputconnections.is_null() || ppoutputconnections.is_null() {
+            mark_output_silent(0);
+            return;
+        }
+
+        // Safety: count == 1 and pointers are non-null per the
+        // checks above. The audio engine guarantees each entry
+        // points to a valid APO_CONNECTION_PROPERTY.
+        let in_ptr = unsafe { *ppinputconnections };
+        let out_ptr = unsafe { *ppoutputconnections };
+        if in_ptr.is_null() || out_ptr.is_null() {
+            mark_output_silent(0);
+            return;
+        }
+        // Safety: same.
+        let in_prop = unsafe { &*in_ptr };
+        let out_prop = unsafe { &mut *out_ptr };
+
+        if in_prop.u32Signature != CONNECTION_PROPERTY_SIGNATURE
+            || out_prop.u32Signature != CONNECTION_PROPERTY_SIGNATURE
+        {
+            mark_output_silent(0);
+            return;
+        }
+
+        let Some(formats) = self.instance.locked_formats() else {
+            mark_output_silent(0);
+            return;
+        };
+        let channels = formats.input.channels() as usize;
+        if channels == 0 || !formats.input.is_float() || formats.input.bits_per_sample() != 32 {
+            // The framework's default ProcessingObject negotiation
+            // only ever accepts pcm_float32; refuse anything else.
+            mark_output_silent(0);
+            return;
+        }
+        let frames = in_prop.u32ValidFrameCount as usize;
+        let sample_count = match frames.checked_mul(channels) {
+            Some(n) => n,
+            None => {
+                mark_output_silent(0);
+                return;
+            }
+        };
+
+        // Safety: the host guarantees the buffers hold at least
+        // u32ValidFrameCount × channels float32 samples. We cap
+        // by `frames` (which the host validated) and treat the
+        // slices as Rust references for the duration of the
+        // dispatch.
+        let input_slice =
+            unsafe { core::slice::from_raw_parts(in_prop.pBuffer as *const f32, sample_count) };
+        let output_slice =
+            unsafe { core::slice::from_raw_parts_mut(out_prop.pBuffer as *mut f32, sample_count) };
+
+        let in_flags: BufferFlags = in_prop.u32BufferFlags.into();
+        // Safety: we are on the audio engine's realtime thread —
+        // APOProcess only runs after LockForProcess set state to
+        // Locked, and the framework gates allocator use through
+        // the `RealtimeContext` parameter.
+        let rt = unsafe { RealtimeContext::new_unchecked() };
+
+        let out_flags =
+            match self
+                .instance
+                .process(&rt, ProcessInput::new(input_slice, in_flags), output_slice)
+            {
+                Ok(f) => f,
+                Err(_) => {
+                    mark_output_silent(in_prop.u32ValidFrameCount);
+                    return;
+                }
+            };
+
+        out_prop.u32ValidFrameCount = in_prop.u32ValidFrameCount;
+        out_prop.u32BufferFlags = out_flags.into();
+    }
+
+    fn CalcInputFrames(&self, u32outputframecount: u32) -> u32 {
+        // No resampling: one input frame yields one output frame.
+        u32outputframecount
+    }
+
+    fn CalcOutputFrames(&self, u32inputframecount: u32) -> u32 {
+        // No resampling: one input frame yields one output frame.
+        u32inputframecount
     }
 }
 
