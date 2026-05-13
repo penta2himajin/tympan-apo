@@ -31,6 +31,22 @@ use crate::error::HResult;
 use crate::format::{Format, FormatNegotiation};
 use crate::realtime::{RealtimeContext, Refcount, State, StateCell};
 
+/// Snapshot of the input/output [`Format`]s the audio engine
+/// negotiated with the APO during `LockForProcess`.
+///
+/// Returned by [`AnyApoInstance::locked_formats`] while the cell
+/// is in [`State::Locked`]; consumers (notably the realtime
+/// `APOProcess` dispatch) need at least `input.channels()` to
+/// translate the host's `pBuffer` into a `&[f32]` of the correct
+/// length.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct LockedFormats {
+    /// Negotiated input stream format.
+    pub input: Format,
+    /// Negotiated output stream format.
+    pub output: Format,
+}
+
 /// Type-erased view of an [`ApoInstance<T>`].
 ///
 /// The framework's COM bridge handles `IClassFactory::CreateInstance`
@@ -68,6 +84,14 @@ pub trait AnyApoInstance: Send + Sync {
         input: ProcessInput<'_>,
         output: &mut [f32],
     ) -> Result<BufferFlags, HResult>;
+
+    /// Negotiated input / output [`Format`]s while the cell is
+    /// in [`State::Locked`]; `None` otherwise.
+    ///
+    /// Realtime-safe: the formats are cached during
+    /// [`Self::lock_for_process`] under exclusive access and
+    /// returned by copy.
+    fn locked_formats(&self) -> Option<LockedFormats>;
 }
 
 /// COM-side wrapper around a `T: ProcessingObject`.
@@ -80,6 +104,12 @@ pub struct ApoInstance<T: ProcessingObject> {
     inner: UnsafeCell<T>,
     state: StateCell,
     refcount: Refcount,
+    /// Negotiated formats cached during `lock_for_process`. Written
+    /// when the state CAS transitions `Initialized → Locked` and
+    /// cleared on `unlock_for_process`; serialised against
+    /// `process` by the host's lifecycle contract (see the module
+    /// doc-comment).
+    locked_formats: UnsafeCell<Option<LockedFormats>>,
 }
 
 // Safety: see the module-level doc-comment. The framework's COM
@@ -99,6 +129,7 @@ impl<T: ProcessingObject> ApoInstance<T> {
             inner: UnsafeCell::new(T::new()),
             state: StateCell::new(),
             refcount: Refcount::new(),
+            locked_formats: UnsafeCell::new(None),
         }
     }
 
@@ -178,7 +209,20 @@ impl<T: ProcessingObject> ApoInstance<T> {
         // not race with each other.
         let inner = unsafe { &mut *self.inner.get() };
         match inner.lock_for_process(input, output) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                // Cache the negotiated formats so the realtime
+                // path can compute buffer geometry without
+                // re-entering the user's negotiation.
+                // Safety: exclusive access while we hold the
+                // CAS-acquired lock state.
+                unsafe {
+                    *self.locked_formats.get() = Some(LockedFormats {
+                        input: *input,
+                        output: *output,
+                    });
+                }
+                Ok(())
+            }
             Err(e) => {
                 // Roll back the state machine so the engine can
                 // retry from Initialized.
@@ -198,10 +242,37 @@ impl<T: ProcessingObject> ApoInstance<T> {
         // process(); host serialises lock/unlock with process.
         let inner = unsafe { &mut *self.inner.get() };
         inner.unlock_for_process();
+        // Drop the cached formats so a subsequent process() call
+        // (which the host would not make, but a logic bug might)
+        // sees a clean None.
+        // Safety: same exclusivity as the inner unlock path above.
+        unsafe {
+            *self.locked_formats.get() = None;
+        }
         self.state
             .unlock()
             .map_err(|_| HResult::APOERR_NOT_LOCKED)?;
         Ok(())
+    }
+
+    /// Snapshot of the negotiated formats, valid while the cell
+    /// is in [`State::Locked`].
+    ///
+    /// Returns `None` whenever the cell is not currently locked.
+    #[inline]
+    #[must_use]
+    pub fn locked_formats(&self) -> Option<LockedFormats> {
+        // Only consult the cache while the cell is locked; load()
+        // is an Acquire load that pairs with the AcqRel CAS used
+        // by lock()/unlock(), so a read here that observes
+        // Locked is sequenced after the matching cache write.
+        if self.state.load() != State::Locked {
+            return None;
+        }
+        // Safety: state == Locked guarantees the host is not
+        // concurrently invoking unlock_for_process (or
+        // lock_for_process again).
+        unsafe { *self.locked_formats.get() }
     }
 
     /// Forward an audio buffer into the user's
@@ -279,6 +350,10 @@ impl<T: ProcessingObject> AnyApoInstance for ApoInstance<T> {
         output: &mut [f32],
     ) -> Result<BufferFlags, HResult> {
         Self::process(self, rt, input, output)
+    }
+    #[inline]
+    fn locked_formats(&self) -> Option<LockedFormats> {
+        Self::locked_formats(self)
     }
 }
 
@@ -536,6 +611,27 @@ mod tests {
             }
             other => panic!("expected Suggest, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn locked_formats_cached_during_lock_for_process() {
+        let apo = ApoInstance::<Trace>::new();
+        assert_eq!(apo.locked_formats(), None);
+
+        apo.initialize().unwrap();
+        assert_eq!(apo.locked_formats(), None);
+
+        let input = Format::pcm_float32(48_000, 1);
+        let output = Format::pcm_float32(44_100, 2);
+        apo.lock_for_process(&input, &output).unwrap();
+        let fmts = apo.locked_formats().unwrap();
+        assert_eq!(fmts.input, input);
+        assert_eq!(fmts.output, output);
+
+        apo.unlock_for_process().unwrap();
+        // Once unlocked, locked_formats no longer reports the
+        // negotiated pair — it is meaningful only while Locked.
+        assert_eq!(apo.locked_formats(), None);
     }
 
     #[test]
