@@ -15,6 +15,7 @@
 //! this stage of the implementation but exported unmangled so that
 //! Tier 2 `dumpbin /exports` verification can already run.
 
+pub mod abi;
 pub mod class_factory;
 pub mod exports;
 pub mod instance_com;

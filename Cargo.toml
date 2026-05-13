@@ -11,8 +11,16 @@ keywords = ["audio", "windows", "apo", "com", "realtime"]
 categories = ["multimedia::audio", "os::windows-apis"]
 publish = false
 
+# Library-only artefact. `register_apo!` emits the four `Dll*`
+# entry points from the user APO's crate root (e.g. the
+# passthrough example below), so the framework crate itself does
+# not need to produce a cdylib. Removing `cdylib` from this list
+# avoids rust-lang/cargo#6313: when the framework is built both
+# as rlib (for downstream linking) and as cdylib (under
+# `--all-targets`), parallel link jobs race to write the same
+# `tympan_apo.dll` and hit LNK1104.
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
 # Reference APO compiled as a separate Windows cdylib so Tier 2
 # CI can verify the four `Dll*` exports via `dumpbin /exports`.

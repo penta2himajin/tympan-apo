@@ -1,0 +1,189 @@
+name: Tier 2
+
+# DLL and COM ABI verification per
+# docs/decisions/0001-ci-verification-strategy.md § Tier 2.
+# Runs on every pull request and every push to main. Target
+# wall-clock budget: < 10 minutes.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tier2-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: short
+  CARGO_INCREMENTAL: 0
+  DLL_PATH: target\x86_64-pc-windows-msvc\release\examples\passthrough.dll
+
+jobs:
+  tier2:
+    name: ABI + signing verification (windows-2025)
+    runs-on: windows-2025
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: tier2
+
+      - name: Set up MSVC developer command prompt (puts dumpbin / signtool on PATH)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build passthrough example cdylib (release)
+        run: cargo build --release --target x86_64-pc-windows-msvc --example passthrough
+
+      - name: dumpbin /exports verifies the four Dll* entry points
+        shell: pwsh
+        run: |
+          $output = (dumpbin /exports "$env:DLL_PATH") | Out-String
+          Write-Output $output
+          $required = @(
+            "DllGetClassObject",
+            "DllCanUnloadNow",
+            "DllRegisterServer",
+            "DllUnregisterServer"
+          )
+          $missing = @()
+          foreach ($sym in $required) {
+            # dumpbin /exports prints one symbol per line in a fixed
+            # columnar format: ordinal, hint, RVA, name.
+            $pattern = "(?m)^\s*\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+$sym\b"
+            if ($output -notmatch $pattern) {
+              $missing += $sym
+            }
+          }
+          if ($missing.Count -gt 0) {
+            Write-Error "::error::Missing required exports: $($missing -join ', ')"
+            exit 1
+          }
+          Write-Output "All four Dll* entry points present and unmangled."
+
+      - name: dumpbin /dependents stays within the allow-list
+        shell: pwsh
+        run: |
+          $output = (dumpbin /dependents "$env:DLL_PATH") | Out-String
+          Write-Output $output
+          # Lines between "Image has the following dependencies:" and
+          # "Summary" list the import-table DLLs.
+          $deps = @()
+          $inBlock = $false
+          $sawAny = $false
+          foreach ($line in ($output -split "`r?`n")) {
+            if ($line -match "Image has the following dependencies:") {
+              $inBlock = $true
+              continue
+            }
+            if (-not $inBlock) { continue }
+            if ($line -match "^\s*Summary") { break }
+            $dep = $line.Trim()
+            if ($dep) {
+              $deps += $dep
+              $sawAny = $true
+            } elseif ($sawAny) {
+              break
+            }
+          }
+          Write-Output ""
+          Write-Output "Extracted dependents:"
+          $deps | ForEach-Object { Write-Output "  $_" }
+          # Allow-list. Anything matching `api-ms-win-*` is part of
+          # the Universal CRT / Windows API forwarder set; the rest
+          # are core OS DLLs the COM bridge legitimately needs.
+          $allowlist = @(
+            "ADVAPI32.dll", "KERNEL32.dll", "USER32.dll", "ntdll.dll",
+            "ole32.dll", "OLE32.dll", "combase.dll", "OLEAUT32.dll",
+            "msvcrt.dll", "VCRUNTIME140.dll", "VCRUNTIME140_1.dll",
+            "bcrypt.dll", "ws2_32.dll", "RPCRT4.dll", "SHELL32.dll"
+          )
+          $disallowed = @()
+          foreach ($dep in $deps) {
+            $matched = $false
+            if ($dep -like "api-ms-win-*") { $matched = $true }
+            foreach ($a in $allowlist) {
+              if ($dep -ieq $a) { $matched = $true; break }
+            }
+            if (-not $matched) { $disallowed += $dep }
+          }
+          if ($disallowed.Count -gt 0) {
+            Write-Error "::error::Disallowed dependents: $($disallowed -join ', ')"
+            exit 1
+          }
+          Write-Output ""
+          Write-Output "All dependents within allow-list."
+
+      - name: Generate ad-hoc test code-signing certificate
+        shell: pwsh
+        run: |
+          # New-SelfSignedCertificate parks the cert in
+          # Cert:\CurrentUser\My; signtool /sha1 references it by
+          # thumbprint. The cert is ephemeral to this job — the
+          # runner is destroyed at job end — so the lack of a real
+          # root chain is intentional.
+          $cert = New-SelfSignedCertificate `
+            -Type CodeSigningCert `
+            -Subject "CN=tympan-apo-tier2-test" `
+            -KeyUsage DigitalSignature `
+            -CertStoreLocation Cert:\CurrentUser\My `
+            -KeyAlgorithm RSA `
+            -KeyLength 2048 `
+            -NotAfter (Get-Date).AddDays(30)
+          Add-Content -Path $env:GITHUB_ENV -Value "CERT_THUMBPRINT=$($cert.Thumbprint)"
+          Add-Content -Path $env:GITHUB_ENV -Value "CERT_SUBJECT=$($cert.Subject)"
+          Write-Output "Generated test cert: $($cert.Subject) ($($cert.Thumbprint))"
+
+      - name: signtool sign exercises the signing path
+        shell: pwsh
+        run: |
+          # /fd sha256: file digest algorithm. We deliberately skip
+          # /tr (RFC 3161 timestamp) — the runner has no upstream
+          # connectivity guarantees for timestamp servers and this
+          # check is about the signing wiring, not timestamp policy.
+          signtool sign /sha1 $env:CERT_THUMBPRINT /fd sha256 "$env:DLL_PATH"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Authenticode signature is attached with the expected signer
+        shell: pwsh
+        run: |
+          # The ad-hoc cert is not in the trusted root store, so
+          # signtool verify /pa would fail chain validation by
+          # design. Read the signature back with PowerShell to
+          # confirm the bytes attached correctly and the signer
+          # subject matches what we generated. That's enough to
+          # validate the signing wiring per ADR 0001 § Tier 2.
+          $sig = Get-AuthenticodeSignature "$env:DLL_PATH"
+          Write-Output "Status: $($sig.Status)"
+          Write-Output "StatusMessage: $($sig.StatusMessage)"
+          if ($sig.SignerCertificate) {
+            Write-Output "Signer: $($sig.SignerCertificate.Subject)"
+          }
+          if (-not $sig.SignerCertificate) {
+            Write-Error "::error::No signer certificate attached to the DLL"
+            exit 1
+          }
+          if ($sig.Status -eq "NotSigned") {
+            Write-Error "::error::Get-AuthenticodeSignature reports NotSigned"
+            exit 1
+          }
+          if ($sig.SignerCertificate.Subject -ne $env:CERT_SUBJECT) {
+            Write-Error "::error::Signer subject mismatch: got '$($sig.SignerCertificate.Subject)', expected '$env:CERT_SUBJECT'"
+            exit 1
+          }
