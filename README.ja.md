@@ -52,4 +52,6 @@ Rust コードから参加できます。
 | [`docs/ja/overview.md`](docs/ja/overview.md) | プロジェクトの目的、スコープ、既存実装との比較 |
 | [`docs/ja/architecture.md`](docs/ja/architecture.md) | API 設計案とモジュール構成 |
 | [`docs/ja/references.md`](docs/ja/references.md) | Microsoft 公式ドキュメント、先行事例、関連クレート |
+| [`docs/ja/testing.md`](docs/ja/testing.md) | GitHub ホスト Windows ランナーを跨ぐテスト・CI 戦略 |
+| [`docs/decisions/`](docs/decisions/) | アーキテクチャ決定記録 (ADR) (英語のみ) |
 | [`docs/handoff-protocol.md`](docs/handoff-protocol.md) | 長期作業のセッション間引き継ぎプロトコル (英語のみ) |
