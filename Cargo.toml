@@ -38,6 +38,14 @@ crate-type = ["cdylib"]
 name = "gain"
 crate-type = ["cdylib"]
 
+# AEC reference scaffold. Builds only with `--features aec`; the
+# source is gated on `cfg(all(windows, feature = "aec"))` so non-
+# AEC builds compile it to an empty cdylib.
+[[example]]
+name = "aec_scaffold"
+crate-type = ["cdylib"]
+required-features = ["aec"]
+
 [features]
 default = []
 aec = []

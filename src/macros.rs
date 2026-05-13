@@ -152,3 +152,106 @@ macro_rules! register_apo {
         }
     };
 }
+
+/// Register a `T: AecProcessingObject` as the AEC APO this DLL
+/// exposes. Mirrors `register_apo!` but uses the AEC carrier
+/// ([`AecApoInstanceCom`](crate::aec::instance_com::AecApoInstanceCom))
+/// and the nine-IID `APO_REG_PROPERTIES` interface list.
+///
+/// Emits, in the calling scope:
+///
+/// - `static __TYMPAN_AEC_APO_VTABLE: AecApoVTable` populated from
+///   `T`'s associated constants and an AEC creator that yields
+///   `Arc<dyn AnyAecApoInstance>` over
+///   `crate::aec::AecApoInstance<T>`.
+/// - `static __TYMPAN_AEC_APO_REGISTRY: [&'static AecApoVTable; 1]`
+///   pointing at the vtable above.
+/// - The four standard `#[no_mangle] pub unsafe extern "system"`
+///   `Dll*` entry points wired to the AEC dispatch helpers in
+///   [`crate::aec::exports`].
+///
+/// ## Single call per crate
+///
+/// Same constraint as `register_apo!`: each cdylib invokes
+/// `register_aec_apo!` exactly once. A given DLL is either an AEC
+/// APO or a plain APO, never both.
+#[cfg(feature = "aec")]
+#[macro_export]
+macro_rules! register_aec_apo {
+    ($t:ty) => {
+        /// Creator routed into the `AecApoVTable::create` slot.
+        #[doc(hidden)]
+        fn __tympan_aec_apo_create() -> ::std::sync::Arc<dyn $crate::aec::AnyAecApoInstance> {
+            ::std::sync::Arc::new($crate::aec::AecApoInstance::<$t>::new())
+        }
+
+        /// Per-AEC-APO vtable.
+        #[doc(hidden)]
+        pub static __TYMPAN_AEC_APO_VTABLE: $crate::aec::class_factory::AecApoVTable =
+            $crate::aec::class_factory::AecApoVTable {
+                clsid: <$t as $crate::ProcessingObject>::CLSID,
+                name: <$t as $crate::ProcessingObject>::NAME,
+                copyright: <$t as $crate::ProcessingObject>::COPYRIGHT,
+                category: <$t as $crate::ProcessingObject>::CATEGORY,
+                create: __tympan_aec_apo_create,
+            };
+
+        /// Registry handed to the AEC dispatch helpers.
+        #[doc(hidden)]
+        static __TYMPAN_AEC_APO_REGISTRY: [&'static $crate::aec::class_factory::AecApoVTable; 1] =
+            [&__TYMPAN_AEC_APO_VTABLE];
+
+        /// COM class-object factory entry point.
+        ///
+        /// # Safety
+        ///
+        /// Called by COM; arguments follow the `DllGetClassObject`
+        /// ABI.
+        #[no_mangle]
+        pub unsafe extern "system" fn DllGetClassObject(
+            rclsid: *const $crate::GUID,
+            riid: *const $crate::GUID,
+            ppv: *mut *mut ::core::ffi::c_void,
+        ) -> $crate::HRESULT {
+            unsafe {
+                $crate::aec::exports::aec_dll_get_class_object_dispatch(
+                    rclsid,
+                    riid,
+                    ppv,
+                    &__TYMPAN_AEC_APO_REGISTRY,
+                )
+            }
+        }
+
+        /// COM unload-readiness query.
+        ///
+        /// # Safety
+        ///
+        /// Called by COM; takes no parameters.
+        #[no_mangle]
+        pub unsafe extern "system" fn DllCanUnloadNow() -> $crate::HRESULT {
+            $crate::raw::exports::dll_can_unload_now_dispatch()
+        }
+
+        /// COM self-registration entry point.
+        ///
+        /// # Safety
+        ///
+        /// Called by `regsvr32`; takes no parameters.
+        #[no_mangle]
+        pub unsafe extern "system" fn DllRegisterServer() -> $crate::HRESULT {
+            $crate::aec::exports::aec_dll_register_server_dispatch(&__TYMPAN_AEC_APO_REGISTRY)
+        }
+
+        /// Inverse of `DllRegisterServer`. Idempotent — missing
+        /// keys are not an error.
+        ///
+        /// # Safety
+        ///
+        /// Called by `regsvr32 /u`; takes no parameters.
+        #[no_mangle]
+        pub unsafe extern "system" fn DllUnregisterServer() -> $crate::HRESULT {
+            $crate::aec::exports::aec_dll_unregister_server_dispatch(&__TYMPAN_AEC_APO_REGISTRY)
+        }
+    };
+}

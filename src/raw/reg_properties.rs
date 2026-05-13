@@ -64,7 +64,17 @@ fn supported_interfaces() -> [GUID; 6] {
 pub fn build_registration_properties(
     instance: &dyn AnyApoInstance,
 ) -> windows_core::Result<*mut APO_REG_PROPERTIES> {
-    let interfaces = supported_interfaces();
+    build_registration_properties_with(instance, &supported_interfaces())
+}
+
+/// Parameterised variant of [`build_registration_properties`]
+/// that accepts an explicit interface IID list — used by the AEC
+/// dispatch in `crate::aec::exports` (gated on `feature = "aec"`)
+/// to emit the nine-IID list (six SISO + three AEC).
+pub fn build_registration_properties_with(
+    instance: &dyn AnyApoInstance,
+    interfaces: &[GUID],
+) -> windows_core::Result<*mut APO_REG_PROPERTIES> {
     let total = total_size(interfaces.len()).ok_or_else(|| {
         windows_core::Error::new(
             HRESULT::from(HResult::E_OUTOFMEMORY),

@@ -38,20 +38,29 @@ use crate::clsid::Clsid;
 use crate::raw::class_factory::ApoVTable;
 
 /// Write the CLSID subtree for a single APO under
-/// `HKEY_CURRENT_USER`.
-///
-/// `dll_path_wide` is a null-terminated UTF-16 string giving the
-/// absolute path of the DLL the audio engine should load to
-/// resolve the CLSID. Discovery is the caller's responsibility;
-/// the helper in [`crate::raw::exports::dll_register_server_dispatch`]
-/// pulls it from `GetModuleFileNameW`.
+/// `HKEY_CURRENT_USER`. Convenience wrapper around
+/// [`write_registry_with`] for the SISO `ApoVTable`.
 pub fn write_registry(vtable: &ApoVTable, dll_path_wide: &[u16]) -> windows_core::Result<()> {
-    let clsid_path = clsid_subkey(&vtable.clsid);
+    write_registry_with(vtable.clsid, vtable.name, dll_path_wide)
+}
+
+/// Write the CLSID subtree under `HKEY_CURRENT_USER` from the
+/// minimum metadata: CLSID + friendly name + DLL path.
+///
+/// Used by both the SISO `write_registry` and the AEC
+/// `aec_dll_register_server_dispatch` to avoid duplicating the
+/// registry-write logic across the two vtable types.
+pub fn write_registry_with(
+    clsid: Clsid,
+    name: &str,
+    dll_path_wide: &[u16],
+) -> windows_core::Result<()> {
+    let clsid_path = clsid_subkey(&clsid);
     let key = create_subkey(HKEY_CURRENT_USER, &clsid_path)?;
-    set_default_value(key, vtable.name);
+    set_default_value(key, name);
     close(key);
 
-    let inproc_path = inproc_subkey(&vtable.clsid);
+    let inproc_path = inproc_subkey(&clsid);
     let inproc = create_subkey(HKEY_CURRENT_USER, &inproc_path)?;
     let set_path = set_default_wide(inproc, dll_path_wide);
     let set_threading = set_named_value(inproc, "ThreadingModel", "Both");

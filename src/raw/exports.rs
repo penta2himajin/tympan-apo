@@ -202,7 +202,7 @@ pub fn dll_unregister_server_dispatch(registry: &[&'static ApoVTable]) -> HRESUL
 /// the helper means there is only one entry point performing the
 /// probe, and `GetModuleHandleExW` resolves it to whichever cdylib
 /// statically linked the framework rlib.
-fn own_module_path() -> windows_core::Result<alloc::vec::Vec<u16>> {
+pub fn own_module_path() -> windows_core::Result<alloc::vec::Vec<u16>> {
     let mut hmodule = HMODULE::default();
     // Reinterpret the function pointer as a UTF-16 string pointer
     // for the windows-rs signature; with FLAG_FROM_ADDRESS set the
