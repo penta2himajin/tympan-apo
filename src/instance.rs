@@ -29,7 +29,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use crate::apo::{ApoCategory, ProcessInput, ProcessingObject, SystemEffect};
+use crate::apo::{ApoCategory, ProcessInput, ProcessingObject, SystemEffect, SystemEffectState};
 use crate::buffer::BufferFlags;
 use crate::clsid::Clsid;
 use crate::error::HResult;
@@ -113,6 +113,16 @@ pub trait AnyApoInstance: Send + Sync {
     /// FFI boundary without holding a borrow on the user state.
     /// Called from non-realtime threads only.
     fn system_effects(&self) -> Vec<SystemEffect>;
+
+    /// Forward an engine-driven `SetAudioSystemEffectState` into
+    /// the user's
+    /// [`ProcessingObject::set_system_effect_state`] override.
+    ///
+    /// Called from non-realtime threads; may race with `process`
+    /// on the realtime thread. The framework caches `id` and
+    /// `state` and calls into `&mut T` under exclusive-by-contract
+    /// access.
+    fn set_system_effect_state(&self, id: &Clsid, state: SystemEffectState);
 }
 
 /// COM-side wrapper around a `T: ProcessingObject`.
@@ -401,6 +411,20 @@ impl<T: ProcessingObject> AnyApoInstance for ApoInstance<T> {
         // `&self` with a `&mut self` in flight elsewhere.
         let inner = unsafe { &*self.inner.get() };
         inner.system_effects().to_vec()
+    }
+    #[inline]
+    fn set_system_effect_state(&self, id: &Clsid, state: SystemEffectState) {
+        // Safety: the audio engine serialises
+        // SetAudioSystemEffectState against itself but NOT against
+        // realtime `process`. Implementors that read effect state
+        // from `process` are expected to mediate the race via
+        // atomics on their side — the framework documents this in
+        // `ProcessingObject::set_system_effect_state`. The
+        // `&mut T` borrow here is the same UnsafeCell pattern used
+        // by `lock_for_process`; with the user's own
+        // synchronisation in place, the write is sound.
+        let inner = unsafe { &mut *self.inner.get() };
+        inner.set_system_effect_state(id, state);
     }
 }
 
