@@ -17,3 +17,4 @@
 
 pub mod class_factory;
 pub mod exports;
+pub mod instance_com;
