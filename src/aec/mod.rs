@@ -38,6 +38,13 @@ use crate::instance::{AnyApoInstance, ApoInstance, LockedFormats};
 use crate::realtime::{RealtimeContext, State};
 use crate::ProcessingObject;
 
+#[cfg(windows)]
+pub mod class_factory;
+#[cfg(windows)]
+pub mod exports;
+#[cfg(windows)]
+pub mod instance_com;
+
 /// Per-buffer auxiliary input handed to
 /// [`AecProcessingObject::accept_aux_input`].
 ///
@@ -114,6 +121,13 @@ pub trait AecProcessingObject: ProcessingObject {
 /// Mirrors [`AnyApoInstance`] but adds the AEC-specific methods
 /// that the COM bridge dispatches through.
 pub trait AnyAecApoInstance: AnyApoInstance {
+    /// Re-borrow `self` as a `&dyn AnyApoInstance` so callers that
+    /// already hold a `&dyn AnyAecApoInstance` can hand it to APIs
+    /// expecting the SISO trait object.
+    ///
+    /// MSRV 1.80 does not stabilise trait upcasting, so the
+    /// framework provides the conversion explicitly.
+    fn as_any_apo_instance(&self) -> &dyn AnyApoInstance;
     /// Forward `add_aux_input` to the user's `AecProcessingObject`.
     fn add_aux_input(&self, id: u32, format: &Format, init_data: &[u8]) -> Result<(), HResult>;
     /// Forward `remove_aux_input` to the user.
@@ -239,6 +253,10 @@ impl<T: AecProcessingObject> AnyApoInstance for AecApoInstance<T> {
 }
 
 impl<T: AecProcessingObject> AnyAecApoInstance for AecApoInstance<T> {
+    fn as_any_apo_instance(&self) -> &dyn AnyApoInstance {
+        self
+    }
+
     fn add_aux_input(&self, id: u32, format: &Format, init_data: &[u8]) -> Result<(), HResult> {
         // Safety: AddAuxiliaryInput is non-realtime and serialised
         // by the engine against process / accept_aux_input;
