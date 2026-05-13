@@ -75,3 +75,20 @@ jobs:
         # The framework's `[profile.dev]` already sets `panic = "abort"`,
         # which assert_no_alloc requires for its on-violation behaviour.
         run: cargo test --target x86_64-pc-windows-msvc --test realtime_safety -- --nocapture
+
+      - name: Build aec_scaffold example cdylib (release, --features aec)
+        run: cargo build --release --features aec --target x86_64-pc-windows-msvc --example aec_scaffold
+
+      - name: Run Tier 3 AEC lifecycle test
+        shell: pwsh
+        env:
+          TYMPAN_AEC_SCAFFOLD_DLL: ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release\examples\aec_scaffold.dll
+        run: |
+          if (-not (Test-Path $env:TYMPAN_AEC_SCAFFOLD_DLL)) {
+            Write-Error "::error::Expected DLL not found at $env:TYMPAN_AEC_SCAFFOLD_DLL"
+            exit 1
+          }
+          # `--test-threads=1` for the same reason as the SISO
+          # tier3_lifecycle test: serialise the two #[ignore]
+          # tests so they do not race on shared process state.
+          cargo test --release --features aec --target x86_64-pc-windows-msvc --test tier3_aec_lifecycle -- --ignored --test-threads=1 --nocapture
