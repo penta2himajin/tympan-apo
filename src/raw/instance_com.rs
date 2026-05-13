@@ -8,15 +8,13 @@
 //!
 //! ## Implementation status
 //!
-//! `Reset`, `GetLatency`, `Initialize`, `IsInputFormatSupported`,
-//! `IsOutputFormatSupported`, `GetInputChannelCount`,
-//! `LockForProcess`, `UnlockForProcess`, `APOProcess`,
-//! `CalcInputFrames`, and `CalcOutputFrames` are wired through to
-//! the user APO via [`AnyApoInstance`]. The format-negotiation
-//! pair routes through the [`crate::raw::media_type`] bridge.
-//! `GetRegistrationProperties` is the only remaining `E_NOTIMPL`
-//! stub and is the subject of the follow-up
-//! `APO_REG_PROPERTIES` builder PR.
+//! All `IAudioProcessingObject` / `IAudioProcessingObjectConfiguration`
+//! / `IAudioProcessingObjectRT` methods are wired through to the
+//! user APO via [`AnyApoInstance`]. The format-negotiation pair
+//! routes through the [`crate::raw::media_type`] bridge.
+//! `GetRegistrationProperties` synthesises the variable-length
+//! `APO_REG_PROPERTIES` payload through
+//! [`crate::raw::reg_properties::build_registration_properties`].
 
 // The `windows_core::implement` proc-macro generates a sibling
 // `*_Impl` struct without doc-comments; the crate-wide
@@ -92,16 +90,10 @@ impl IAudioProcessingObject_Impl for ApoInstanceCom_Impl {
     }
 
     fn GetRegistrationProperties(&self) -> windows_core::Result<*mut APO_REG_PROPERTIES> {
-        // APO_REG_PROPERTIES has a variable-length IID list at
-        // the tail and needs a CoTaskMemAlloc-allocated buffer.
-        // Implementing it correctly requires the
-        // ApoVTable.{name,copyright,clsid} accessor work that
-        // will land alongside the IUnknown wrapper for the class
-        // factory.
-        Err(windows_core::Error::new(
-            HRESULT::from(HResult::E_NOTIMPL),
-            "GetRegistrationProperties not yet implemented",
-        ))
+        // The audio engine takes ownership of the returned buffer
+        // and releases it with CoTaskMemFree. The builder allocates
+        // with the matching CoTaskMemAlloc.
+        crate::raw::reg_properties::build_registration_properties(self.instance.as_ref())
     }
 
     fn Initialize(&self, _cbdatasize: u32, _pbydata: *const u8) -> windows_core::Result<()> {
@@ -519,5 +511,26 @@ mod tests {
         // Safety: live IAudioProcessingObject vtable.
         let count = unsafe { apo.GetInputChannelCount() }.unwrap();
         assert_eq!(count, 6);
+    }
+
+    #[test]
+    fn get_registration_properties_routes_through_builder() {
+        use windows::Win32::Media::Audio::Apo::IAudioProcessingObject;
+        use windows::Win32::System::Com::CoTaskMemFree;
+        use windows_core::ComObject;
+
+        let apo: IAudioProcessingObject = ComObject::new(new_com()).into_interface();
+        // Safety: live IAudioProcessingObject vtable.
+        let props = unsafe { apo.GetRegistrationProperties() }.unwrap();
+        assert!(!props.is_null());
+        // Safety: builder-produced live pointer; we read the CLSID
+        // back through it before handing it to CoTaskMemFree.
+        unsafe {
+            assert_eq!(
+                crate::clsid::Clsid::from((*props).clsid),
+                <Dummy as ProcessingObject>::CLSID
+            );
+            CoTaskMemFree(Some(props.cast()));
+        }
     }
 }

@@ -25,8 +25,9 @@
 
 use core::cell::UnsafeCell;
 
-use crate::apo::{ProcessInput, ProcessingObject};
+use crate::apo::{ApoCategory, ProcessInput, ProcessingObject};
 use crate::buffer::BufferFlags;
+use crate::clsid::Clsid;
 use crate::error::HResult;
 use crate::format::{Format, FormatNegotiation};
 use crate::realtime::{RealtimeContext, Refcount, State, StateCell};
@@ -92,6 +93,15 @@ pub trait AnyApoInstance: Send + Sync {
     /// [`Self::lock_for_process`] under exclusive access and
     /// returned by copy.
     fn locked_formats(&self) -> Option<LockedFormats>;
+
+    /// User-declared CLSID (`T::CLSID`).
+    fn clsid(&self) -> Clsid;
+    /// User-declared friendly name (`T::NAME`).
+    fn name(&self) -> &'static str;
+    /// User-declared copyright string (`T::COPYRIGHT`).
+    fn copyright(&self) -> &'static str;
+    /// User-declared APO category (`T::CATEGORY`).
+    fn category(&self) -> ApoCategory;
 }
 
 /// COM-side wrapper around a `T: ProcessingObject`.
@@ -354,6 +364,22 @@ impl<T: ProcessingObject> AnyApoInstance for ApoInstance<T> {
     #[inline]
     fn locked_formats(&self) -> Option<LockedFormats> {
         Self::locked_formats(self)
+    }
+    #[inline]
+    fn clsid(&self) -> Clsid {
+        T::CLSID
+    }
+    #[inline]
+    fn name(&self) -> &'static str {
+        T::NAME
+    }
+    #[inline]
+    fn copyright(&self) -> &'static str {
+        T::COPYRIGHT
+    }
+    #[inline]
+    fn category(&self) -> ApoCategory {
+        T::CATEGORY
     }
 }
 
