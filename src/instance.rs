@@ -151,7 +151,6 @@ unsafe impl<T: ProcessingObject> Sync for ApoInstance<T> {}
 impl<T: ProcessingObject> ApoInstance<T> {
     /// Construct a fresh instance in the
     /// [`State::Uninitialized`] state with refcount 0.
-    ///
     /// Calls `T::new` to materialise the user's APO state; heap
     /// allocation is permitted here.
     #[must_use]
@@ -171,6 +170,21 @@ impl<T: ProcessingObject> ApoInstance<T> {
         self.state.load()
     }
 
+    /// Crate-private access to the inner `UnsafeCell<T>`. The AEC
+    /// carrier in `crate::aec` (gated on `feature = "aec"`) reuses
+    /// this to dispatch `AecProcessingObject`-specific methods
+    /// through the same exclusive-by-contract `&mut T` access the
+    /// SISO methods on this struct use.
+    ///
+    /// Callers must uphold the same exclusivity contract: the
+    /// audio engine serialises lifecycle vs process access, so
+    /// `&mut T` is sound iff the call is on the matching engine
+    /// thread.
+    #[inline]
+    #[allow(dead_code)] // consumed only by the AEC carrier under feature = "aec"
+    pub(crate) fn inner_cell(&self) -> &UnsafeCell<T> {
+        &self.inner
+    }
     /// Current reference count.
     #[inline]
     #[must_use]
