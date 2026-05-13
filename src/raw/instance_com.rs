@@ -60,9 +60,12 @@ impl ApoInstanceCom {
     /// Wrap an existing instance for COM exposure.
     ///
     /// Called by the framework's class factory; users do not
-    /// construct this directly.
+    /// construct this directly. Increments the cdylib's
+    /// outstanding-instance counter so `DllCanUnloadNow` reports
+    /// `S_FALSE` while this object is live.
     #[must_use]
     pub fn new(instance: Arc<dyn AnyApoInstance>) -> Self {
+        crate::raw::exports::outstanding_inc();
         Self { instance }
     }
 
@@ -71,6 +74,15 @@ impl ApoInstanceCom {
     #[must_use]
     pub fn instance(&self) -> &Arc<dyn AnyApoInstance> {
         &self.instance
+    }
+}
+
+impl Drop for ApoInstanceCom {
+    fn drop(&mut self) {
+        // Symmetric counterpart of the `outstanding_inc` in `new`.
+        // Fires when the COM refcount on the wrapping `ComObject`
+        // reaches zero and the box is freed.
+        crate::raw::exports::outstanding_dec();
     }
 }
 

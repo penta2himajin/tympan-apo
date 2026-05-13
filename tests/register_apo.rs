@@ -106,11 +106,45 @@ fn dll_get_class_object_returns_class_e_classnotavailable_for_unknown_clsid() {
     assert!(out.is_null());
 }
 
+/// At test start there are no outstanding `ApoInstanceCom` objects,
+/// so `DllCanUnloadNow` returns `S_OK` (0). Once an instance is
+/// minted via the class factory the same call returns `S_FALSE` (1)
+/// until the instance is released.
 #[test]
-fn dll_can_unload_now_returns_s_false_while_stubbed() {
-    // S_FALSE = 1
+fn dll_can_unload_now_tracks_outstanding_instances() {
+    use core::ffi::c_void;
+    use tympan_apo::{GUID, HRESULT};
+    use windows::Win32::System::Com::IClassFactory;
+    use windows_core::Interface;
+
+    // S_OK = 0 — no instances yet.
     let hr = unsafe { DllCanUnloadNow() };
-    assert_eq!(hr.0, 1);
+    assert_eq!(hr.0, 0, "DllCanUnloadNow before any CreateInstance");
+
+    // Mint a class factory and an instance through it; the
+    // resulting IUnknown holds an ApoInstanceCom alive.
+    let clsid: GUID = Passthrough::CLSID.into();
+    let iid: GUID = IClassFactory::IID;
+    let mut out: *mut c_void = core::ptr::null_mut();
+    let hr: HRESULT = unsafe { DllGetClassObject(&clsid, &iid, &mut out) };
+    assert!(hr.is_ok());
+    // Safety: out is a valid IClassFactory pointer.
+    let factory = unsafe { IClassFactory::from_raw(out) };
+    // Safety: live IClassFactory; aggregation unsupported.
+    let _instance: windows_core::IUnknown =
+        unsafe { factory.CreateInstance(None) }.expect("CreateInstance failed");
+
+    // S_FALSE = 1 — at least one instance is outstanding.
+    let hr = unsafe { DllCanUnloadNow() };
+    assert_eq!(hr.0, 1, "DllCanUnloadNow with instance outstanding");
+
+    drop(_instance);
+    drop(factory);
+
+    // Back to S_OK once instances drop. (The factory itself does
+    // not increment the outstanding counter.)
+    let hr = unsafe { DllCanUnloadNow() };
+    assert_eq!(hr.0, 0, "DllCanUnloadNow after instance drops");
 }
 
 /// Round-trip the per-user CLSID subtree via the macro-emitted
