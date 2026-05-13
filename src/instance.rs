@@ -25,7 +25,11 @@
 
 use core::cell::UnsafeCell;
 
-use crate::apo::{ApoCategory, ProcessInput, ProcessingObject};
+extern crate alloc;
+
+use alloc::vec::Vec;
+
+use crate::apo::{ApoCategory, ProcessInput, ProcessingObject, SystemEffect};
 use crate::buffer::BufferFlags;
 use crate::clsid::Clsid;
 use crate::error::HResult;
@@ -102,6 +106,13 @@ pub trait AnyApoInstance: Send + Sync {
     fn copyright(&self) -> &'static str;
     /// User-declared APO category (`T::CATEGORY`).
     fn category(&self) -> ApoCategory;
+
+    /// Snapshot of the user APO's advertised system-effect list.
+    ///
+    /// Returned by copy so the COM bridge can marshal it across the
+    /// FFI boundary without holding a borrow on the user state.
+    /// Called from non-realtime threads only.
+    fn system_effects(&self) -> Vec<SystemEffect>;
 }
 
 /// COM-side wrapper around a `T: ProcessingObject`.
@@ -380,6 +391,16 @@ impl<T: ProcessingObject> AnyApoInstance for ApoInstance<T> {
     #[inline]
     fn category(&self) -> ApoCategory {
         T::CATEGORY
+    }
+    #[inline]
+    fn system_effects(&self) -> Vec<SystemEffect> {
+        // Safety: read-only access to the inner T. The framework
+        // guarantees this method is mutually exclusive with
+        // `lock_for_process` / `process` / `unlock_for_process`
+        // through the host's serialisation contract; we never alias
+        // `&self` with a `&mut self` in flight elsewhere.
+        let inner = unsafe { &*self.inner.get() };
+        inner.system_effects().to_vec()
     }
 }
 
