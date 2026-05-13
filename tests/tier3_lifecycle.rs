@@ -50,7 +50,8 @@ use windows::Win32::Media::Audio::Apo::{
     APO_CONNECTION_PROPERTY, BUFFER_INVALID, BUFFER_VALID,
 };
 use windows::Win32::System::Com::{
-    CoInitializeEx, CoUninitialize, IClassFactory, COINIT_MULTITHREADED,
+    CoCreateInstance, CoInitializeEx, CoUninitialize, IClassFactory, CLSCTX_INPROC_SERVER,
+    COINIT_MULTITHREADED,
 };
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows_core::{Interface, GUID, HRESULT, PCSTR, PCWSTR};
@@ -142,27 +143,12 @@ fn descriptor(
     }
 }
 
-#[test]
-#[ignore = "requires TYMPAN_PASSTHROUGH_DLL pointing at the built passthrough cdylib; \
-            opt in via `cargo test --test tier3_lifecycle -- --ignored` (Tier 3 CI does this)"]
-fn passthrough_dll_drives_full_lifecycle() {
-    let (_module_guard, dll_get_class_object) = load_passthrough();
-
-    // Safety: COINIT_MULTITHREADED on a thread that has not yet
-    // called CoInitializeEx. S_FALSE is returned if COM is already
-    // initialised on this thread — we accept either.
-    let init = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-    assert!(
-        init.is_ok() || init.0 == 1, /* S_FALSE */
-        "CoInitializeEx returned {init:?}"
-    );
-
-    let factory = create_factory(dll_get_class_object);
-    // Safety: live IClassFactory; aggregation is unsupported so
-    // `pUnkOuter = None` is the only correct argument.
-    let apo: IAudioProcessingObject = unsafe { factory.CreateInstance(None) }
-        .expect("CreateInstance(IAudioProcessingObject) failed");
-
+/// Drive `Initialize → IsInputFormatSupported → LockForProcess →
+/// APOProcess × N → UnlockForProcess` against `apo` and assert
+/// passthrough's analytic bounds (output bitwise-equal to input,
+/// every sample finite). Shared between the LoadLibrary and
+/// regsvr32 + CoCreateInstance activation paths.
+fn drive_passthrough_lifecycle(apo: &IAudioProcessingObject) {
     // Safety: live IAudioProcessingObject. The framework's
     // `Initialize` does not yet consume init data; pass an empty
     // slice.
@@ -245,11 +231,100 @@ fn passthrough_dll_drives_full_lifecycle() {
 
     // Safety: live IAudioProcessingObjectConfiguration.
     unsafe { config.UnlockForProcess() }.expect("UnlockForProcess failed");
+}
 
-    drop(rt);
-    drop(config);
+/// Initialise COM on this thread; accept both `S_OK` and `S_FALSE`
+/// (the latter is returned when COM is already initialised by a
+/// previous test in the same process).
+fn co_initialize() {
+    let init = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    assert!(
+        init.is_ok() || init.0 == 1, /* S_FALSE */
+        "CoInitializeEx returned {init:?}"
+    );
+}
+
+/// RAII cleanup: invoke `regsvr32 /s /u <dll>` on drop so the user
+/// hive is restored to its starting state even if a test panics
+/// after registration.
+struct Regsvr32Cleanup(std::path::PathBuf);
+
+impl Drop for Regsvr32Cleanup {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("regsvr32")
+            .args(["/s", "/u"])
+            .arg(&self.0)
+            .status();
+    }
+}
+
+fn regsvr32_register(dll: &std::path::Path) {
+    let status = std::process::Command::new("regsvr32")
+        .args(["/s"])
+        .arg(dll)
+        .status()
+        .expect("failed to spawn regsvr32");
+    assert!(
+        status.success(),
+        "regsvr32 /s {} exited with {status:?}",
+        dll.display()
+    );
+}
+
+#[test]
+#[ignore = "requires TYMPAN_PASSTHROUGH_DLL pointing at the built passthrough cdylib; \
+            opt in via `cargo test --test tier3_lifecycle -- --ignored` (Tier 3 CI does this)"]
+fn passthrough_dll_drives_full_lifecycle() {
+    let (_module_guard, dll_get_class_object) = load_passthrough();
+
+    co_initialize();
+
+    let factory = create_factory(dll_get_class_object);
+    // Safety: live IClassFactory; aggregation is unsupported so
+    // `pUnkOuter = None` is the only correct argument.
+    let apo: IAudioProcessingObject = unsafe { factory.CreateInstance(None) }
+        .expect("CreateInstance(IAudioProcessingObject) failed");
+
+    drive_passthrough_lifecycle(&apo);
+
     drop(apo);
     drop(factory);
+
+    // Safety: every prior CoInitializeEx that returned S_OK or
+    // S_FALSE must be paired with a CoUninitialize.
+    unsafe { CoUninitialize() };
+}
+
+#[test]
+#[ignore = "requires TYMPAN_PASSTHROUGH_DLL pointing at the built passthrough cdylib and `regsvr32` \
+            on PATH; opt in via `cargo test --test tier3_lifecycle -- --ignored` (Tier 3 CI does this)"]
+fn passthrough_via_regsvr32_and_cocreateinstance() {
+    let path = dll_path();
+
+    // Initialise COM before any registry write, so the activator's
+    // first lookup happens against a COM-initialised thread.
+    co_initialize();
+
+    // regsvr32 invokes DllRegisterServer in its own process which
+    // calls into the framework's HKCU-writing dispatch helper. The
+    // user hive is the same across processes for this user, so the
+    // test process's CoCreateInstance below resolves the CLSID
+    // through that fresh registration.
+    regsvr32_register(&path);
+    let _cleanup = Regsvr32Cleanup(path.clone());
+
+    let clsid: GUID = PASSTHROUGH_CLSID.into();
+    // Safety: clsid points to a live GUID; CoCreateInstance with
+    // CLSCTX_INPROC_SERVER does the registry lookup, LoadLibrary's
+    // the resolved DLL, calls DllGetClassObject, and routes
+    // CreateInstance to the IID_IAudioProcessingObject vtable.
+    let apo: IAudioProcessingObject =
+        unsafe { CoCreateInstance(&clsid, None, CLSCTX_INPROC_SERVER) }
+            .expect("CoCreateInstance(CLSID_PASSTHROUGH, IAudioProcessingObject) failed");
+
+    drive_passthrough_lifecycle(&apo);
+
+    drop(apo);
 
     // Safety: every prior CoInitializeEx that returned S_OK or
     // S_FALSE must be paired with a CoUninitialize.
