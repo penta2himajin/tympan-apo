@@ -32,6 +32,12 @@ crate-type = ["rlib"]
 name = "passthrough"
 crate-type = ["cdylib"]
 
+# Second reference APO: applies a fixed linear gain. Demonstrates
+# per-instance processing state on top of the passthrough template.
+[[example]]
+name = "gain"
+crate-type = ["cdylib"]
+
 [features]
 default = []
 aec = []
