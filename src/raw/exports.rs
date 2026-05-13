@@ -8,19 +8,32 @@
 //! macro's emitted exports would otherwise collide with framework
 //! ones at link time.
 //!
-//! This module supplies the reusable building block the macro's
-//! emitted `DllGetClassObject` calls into:
-//! [`dll_get_class_object_dispatch`] — a CLSID-to-factory lookup
-//! that materialises an [`ApoClassFactory`] and routes the
-//! requested IID through `IUnknown::QueryInterface`.
+//! This module supplies the reusable building blocks the macro's
+//! emitted entry points call into:
+//!
+//! - [`dll_get_class_object_dispatch`] — CLSID → factory lookup
+//!   that materialises an [`ApoClassFactory`] and routes the
+//!   requested IID through `IUnknown::QueryInterface`.
+//! - [`dll_register_server_dispatch`] /
+//!   [`dll_unregister_server_dispatch`] — registry-side
+//!   self-registration, delegating to
+//!   [`crate::raw::register`].
+
+extern crate alloc;
 
 use core::ffi::c_void;
 
-use windows_core::{ComObject, IUnknown, Interface, GUID, HRESULT};
+use windows::Win32::Foundation::HMODULE;
+use windows::Win32::System::LibraryLoader::{
+    GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+};
+use windows_core::{ComObject, IUnknown, Interface, GUID, HRESULT, PCWSTR};
 
 use crate::clsid::Clsid;
 use crate::error::HResult;
 use crate::raw::class_factory::{ApoClassFactory, ApoVTable};
+use crate::raw::register;
 
 /// CLSID → factory dispatch shared by every user-emitted
 /// `DllGetClassObject`.
@@ -74,6 +87,95 @@ pub unsafe fn dll_get_class_object_dispatch(
     // Safety: unknown is a valid IUnknown pointer; the COM
     // caller guarantees `riid` and `ppv` are valid.
     unsafe { unknown.query(riid, ppv) }
+}
+
+/// `DllRegisterServer` dispatch: writes each `ApoVTable` in
+/// `registry` to the per-user CLSID registry hive.
+///
+/// Discovers the calling DLL's absolute path via
+/// `GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS)` on
+/// this function's own address — since the framework rlib is
+/// linked into each cdylib statically, that address resolves to
+/// the cdylib calling us.
+///
+/// On any registry-write failure the routine returns the first
+/// failing `HRESULT` *without* rolling back previously-written
+/// keys. Pair with [`dll_unregister_server_dispatch`] to clean up.
+pub fn dll_register_server_dispatch(registry: &[&'static ApoVTable]) -> HRESULT {
+    let dll_path = match own_module_path() {
+        Ok(p) => p,
+        Err(e) => return e.code(),
+    };
+    for vtable in registry {
+        if let Err(e) = register::write_registry(vtable, &dll_path) {
+            return e.code();
+        }
+    }
+    HRESULT(0)
+}
+
+/// `DllUnregisterServer` dispatch: removes each `ApoVTable`'s
+/// CLSID subtree under `HKEY_CURRENT_USER`.
+///
+/// Idempotent on a per-CLSID basis (missing keys are not an error)
+/// but iterates through `registry` in order; on the first failure
+/// other than "key not present", the routine returns that
+/// `HRESULT` without continuing.
+pub fn dll_unregister_server_dispatch(registry: &[&'static ApoVTable]) -> HRESULT {
+    for vtable in registry {
+        if let Err(e) = register::clear_registry(&vtable.clsid) {
+            return e.code();
+        }
+    }
+    HRESULT(0)
+}
+
+/// Look up the absolute path of the DLL this code is linked into.
+///
+/// Returns a UTF-16 buffer ending in a null terminator, ready for
+/// `RegSetValueExW(REG_SZ)` consumption. The pointer used as the
+/// address-of-module probe is this function itself: `dll_register_server_dispatch`
+/// would also work and is what the public callers exercise — using
+/// the helper means there is only one entry point performing the
+/// probe, and `GetModuleHandleExW` resolves it to whichever cdylib
+/// statically linked the framework rlib.
+fn own_module_path() -> windows_core::Result<alloc::vec::Vec<u16>> {
+    let mut hmodule = HMODULE::default();
+    // Reinterpret the function pointer as a UTF-16 string pointer
+    // for the windows-rs signature; with FLAG_FROM_ADDRESS set the
+    // API treats it as an address rather than dereferencing it as
+    // a string.
+    let address = own_module_path as *const c_void;
+    // Safety: `address` is the address of a static function in the
+    // current DLL; the FROM_ADDRESS flag instructs the loader to
+    // resolve the address rather than the conceptual UTF-16
+    // string. UNCHANGED_REFCOUNT avoids us holding an extra
+    // reference on the module.
+    unsafe {
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            PCWSTR(address.cast::<u16>()),
+            &mut hmodule,
+        )
+    }?;
+
+    // GetModuleFileNameW: 1024 wchars covers typical install
+    // paths. The Windows limit is `MAX_PATH = 260` for legacy
+    // applications and ~32 KB for long-path-aware ones; APOs are
+    // typically under `Program Files\<vendor>\` so 1024 has
+    // comfortable headroom.
+    let mut buf = alloc::vec![0u16; 1024];
+    // Safety: buf is writable for buf.len() wchars; hmodule is
+    // live for the duration of the call.
+    let written = unsafe { GetModuleFileNameW(Some(hmodule), &mut buf) };
+    if written == 0 {
+        return Err(windows_core::Error::from_thread());
+    }
+    // GetModuleFileNameW returns the number of characters written
+    // *excluding* the null terminator. Truncate to include the
+    // terminator.
+    buf.truncate(written as usize + 1);
+    Ok(buf)
 }
 
 #[cfg(test)]

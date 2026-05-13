@@ -113,9 +113,20 @@ fn dll_can_unload_now_returns_s_false_while_stubbed() {
     assert_eq!(hr.0, 1);
 }
 
+/// Round-trip the per-user CLSID subtree via the macro-emitted
+/// entry points. DllRegisterServer writes
+/// `HKCU\Software\Classes\CLSID\{11111111-…}\InprocServer32`;
+/// DllUnregisterServer removes the subtree. Both must return
+/// S_OK; the unregister leaves the user hive in its starting
+/// state so the test has no persistent side effect on the CI
+/// runner.
 #[test]
-fn dll_register_server_returns_s_ok_while_stubbed() {
-    // S_OK = 0
-    assert_eq!(unsafe { DllRegisterServer() }.0, 0);
-    assert_eq!(unsafe { DllUnregisterServer() }.0, 0);
+fn dll_register_server_round_trips_through_hkcu() {
+    let register = unsafe { DllRegisterServer() };
+    assert_eq!(register.0, 0, "DllRegisterServer returned {register:?}");
+    let unregister = unsafe { DllUnregisterServer() };
+    assert_eq!(
+        unregister.0, 0,
+        "DllUnregisterServer returned {unregister:?}"
+    );
 }
