@@ -15,9 +15,11 @@
 //! behind `#[cfg(windows)]`.
 
 mod context;
+mod refcount;
 mod ring;
 mod state;
 
 pub use context::RealtimeContext;
+pub use refcount::Refcount;
 pub use ring::{spsc, Consumer, Producer};
 pub use state::{State, StateCell, TransitionError};
