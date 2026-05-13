@@ -38,6 +38,7 @@ pub mod buffer;
 pub mod clsid;
 pub mod error;
 pub mod format;
+pub mod instance;
 pub mod realtime;
 
 #[cfg(windows)]
