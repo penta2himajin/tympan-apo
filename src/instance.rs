@@ -31,6 +31,45 @@ use crate::error::HResult;
 use crate::format::{Format, FormatNegotiation};
 use crate::realtime::{RealtimeContext, Refcount, State, StateCell};
 
+/// Type-erased view of an [`ApoInstance<T>`].
+///
+/// The framework's COM bridge handles `IClassFactory::CreateInstance`
+/// without knowing the user's concrete `T: ProcessingObject` at the
+/// vtable layer — every implementor reaches the audio engine through
+/// a `dyn AnyApoInstance` virtual table. The trait surfaces every
+/// method `ApoInstance<T>` exposes, dispatched through `Arc<dyn ...>`.
+pub trait AnyApoInstance: Send + Sync {
+    /// `IUnknown::AddRef`.
+    fn add_ref(&self) -> u32;
+    /// `IUnknown::Release`.
+    fn release(&self) -> u32;
+    /// Current COM reference count.
+    fn refcount(&self) -> u32;
+    /// Current lifecycle state.
+    fn state(&self) -> State;
+
+    /// Lifecycle: `Uninitialized → Initialized`.
+    fn initialize(&self) -> Result<(), HResult>;
+    /// Lifecycle: `Initialized → Locked`, forwarding to the user.
+    fn lock_for_process(&self, input: &Format, output: &Format) -> Result<(), HResult>;
+    /// Lifecycle: `Locked → Initialized`, forwarding to the user.
+    fn unlock_for_process(&self) -> Result<(), HResult>;
+
+    /// Format negotiation entry points (state-agnostic, read-only on `T`).
+    fn is_input_format_supported(&self, format: &Format) -> FormatNegotiation;
+    /// See [`Self::is_input_format_supported`].
+    fn is_output_format_supported(&self, format: &Format) -> FormatNegotiation;
+
+    /// Realtime: drive one audio buffer through the user's
+    /// `process` callback.
+    fn process(
+        &self,
+        rt: &RealtimeContext,
+        input: ProcessInput<'_>,
+        output: &mut [f32],
+    ) -> Result<BufferFlags, HResult>;
+}
+
 /// COM-side wrapper around a `T: ProcessingObject`.
 ///
 /// Owns the user's APO instance and tracks its lifecycle (state +
@@ -192,6 +231,54 @@ impl<T: ProcessingObject> ApoInstance<T> {
 impl<T: ProcessingObject> Default for ApoInstance<T> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<T: ProcessingObject> AnyApoInstance for ApoInstance<T> {
+    #[inline]
+    fn add_ref(&self) -> u32 {
+        Self::add_ref(self)
+    }
+    #[inline]
+    fn release(&self) -> u32 {
+        Self::release(self)
+    }
+    #[inline]
+    fn refcount(&self) -> u32 {
+        Self::refcount(self)
+    }
+    #[inline]
+    fn state(&self) -> State {
+        Self::state(self)
+    }
+    #[inline]
+    fn initialize(&self) -> Result<(), HResult> {
+        Self::initialize(self)
+    }
+    #[inline]
+    fn is_input_format_supported(&self, format: &Format) -> FormatNegotiation {
+        Self::is_input_format_supported(self, format)
+    }
+    #[inline]
+    fn is_output_format_supported(&self, format: &Format) -> FormatNegotiation {
+        Self::is_output_format_supported(self, format)
+    }
+    #[inline]
+    fn lock_for_process(&self, input: &Format, output: &Format) -> Result<(), HResult> {
+        Self::lock_for_process(self, input, output)
+    }
+    #[inline]
+    fn unlock_for_process(&self) -> Result<(), HResult> {
+        Self::unlock_for_process(self)
+    }
+    #[inline]
+    fn process(
+        &self,
+        rt: &RealtimeContext,
+        input: ProcessInput<'_>,
+        output: &mut [f32],
+    ) -> Result<BufferFlags, HResult> {
+        Self::process(self, rt, input, output)
     }
 }
 
@@ -449,5 +536,41 @@ mod tests {
             }
             other => panic!("expected Suggest, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn type_erased_dispatch_drives_full_lifecycle() {
+        // Exercise the COM bridge's path: hold the instance behind
+        // `Arc<dyn AnyApoInstance>` and run a full init / lock /
+        // process / unlock through the vtable.
+        use std::sync::Arc;
+        let inst: Arc<dyn AnyApoInstance> = Arc::new(ApoInstance::<Trace>::new());
+
+        assert_eq!(inst.state(), State::Uninitialized);
+        assert_eq!(inst.refcount(), 0);
+
+        assert_eq!(inst.add_ref(), 1);
+        inst.initialize().unwrap();
+
+        let f = Format::pcm_float32(48_000, 1);
+        inst.lock_for_process(&f, &f).unwrap();
+        assert_eq!(inst.state(), State::Locked);
+
+        let samples = [0.25_f32, -0.5, 0.75, -1.0];
+        let mut output = [0.0_f32; 4];
+        let rt = rt();
+        let out_flags = inst
+            .process(
+                &rt,
+                ProcessInput::new(&samples, BufferFlags::VALID),
+                &mut output,
+            )
+            .unwrap();
+        assert_eq!(out_flags, BufferFlags::VALID);
+        assert_eq!(output, samples);
+
+        inst.unlock_for_process().unwrap();
+        assert_eq!(inst.state(), State::Initialized);
+        assert_eq!(inst.release(), 0);
     }
 }

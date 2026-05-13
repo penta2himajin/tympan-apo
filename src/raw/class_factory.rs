@@ -30,13 +30,18 @@
 // `#![deny(missing_docs)]` would otherwise reject the expansion.
 #![allow(missing_docs)]
 
+use alloc::sync::Arc;
 use core::ffi::c_void;
 
 use windows::Win32::System::Com::{IClassFactory, IClassFactory_Impl};
 use windows_core::{implement, IUnknown, Ref, BOOL, GUID, HRESULT};
 
+extern crate alloc;
+
+use crate::apo::ApoCategory;
 use crate::clsid::Clsid;
 use crate::error::HResult;
+use crate::instance::AnyApoInstance;
 use crate::realtime::Refcount;
 
 /// VTable-style metadata describing one user APO.
@@ -45,14 +50,37 @@ use crate::realtime::Refcount;
 /// future `register_apo!` macro. The factory points to the table
 /// rather than carrying a generic parameter, side-stepping
 /// `windows_core::implement`'s lack of generics support.
-#[derive(Debug)]
+///
+/// `create` is the type-erased entry point: it is a function
+/// pointer that materialises a fresh [`crate::instance::ApoInstance<T>`]
+/// and exposes it as an `Arc<dyn AnyApoInstance>`. The future
+/// IUnknown wrapper will call `create()` from
+/// `IClassFactory::CreateInstance`.
 pub struct ApoVTable {
-    /// The CLSID this factory answers to.
+    /// The CLSID this factory answers to (`T::CLSID`).
     pub clsid: Clsid,
     /// Human-readable name (`T::NAME`).
     pub name: &'static str,
     /// Copyright string (`T::COPYRIGHT`).
     pub copyright: &'static str,
+    /// Category (`T::CATEGORY`).
+    pub category: ApoCategory,
+    /// Type-erased instance creator. Calls `T::new` internally and
+    /// returns the resulting `ApoInstance<T>` wrapped in
+    /// `Arc<dyn AnyApoInstance>`.
+    pub create: fn() -> Arc<dyn AnyApoInstance>,
+}
+
+impl core::fmt::Debug for ApoVTable {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ApoVTable")
+            .field("clsid", &self.clsid)
+            .field("name", &self.name)
+            .field("copyright", &self.copyright)
+            .field("category", &self.category)
+            // function pointer omitted for stable Debug output
+            .finish_non_exhaustive()
+    }
 }
 
 /// COM class factory.
@@ -132,11 +160,44 @@ impl IClassFactory_Impl for ApoClassFactory_Impl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::apo::{ProcessInput, ProcessingObject};
+    use crate::buffer::BufferFlags;
+    use crate::instance::ApoInstance;
+    use crate::realtime::{RealtimeContext, State};
+
+    struct Dummy;
+
+    impl ProcessingObject for Dummy {
+        const CLSID: Clsid = Clsid::from_u128(0xABCDEF01_2345_6789_0123_456789ABCDEF);
+        const NAME: &'static str = "dummy";
+        const COPYRIGHT: &'static str = "test";
+        const CATEGORY: ApoCategory = ApoCategory::Sfx;
+
+        fn new() -> Self {
+            Self
+        }
+
+        fn process(
+            &mut self,
+            _rt: &RealtimeContext,
+            input: ProcessInput<'_>,
+            output: &mut [f32],
+        ) -> BufferFlags {
+            output.copy_from_slice(input.samples());
+            input.flags()
+        }
+    }
+
+    fn dummy_create() -> Arc<dyn AnyApoInstance> {
+        Arc::new(ApoInstance::<Dummy>::new())
+    }
 
     static DUMMY_VT: ApoVTable = ApoVTable {
-        clsid: Clsid::from_u128(0xABCDEF01_2345_6789_0123_456789ABCDEF),
-        name: "dummy",
-        copyright: "test",
+        clsid: Dummy::CLSID,
+        name: Dummy::NAME,
+        copyright: Dummy::COPYRIGHT,
+        category: Dummy::CATEGORY,
+        create: dummy_create,
     };
 
     #[test]
@@ -144,5 +205,18 @@ mod tests {
         let f = ApoClassFactory::new(&DUMMY_VT);
         assert_eq!(f.server_lock_count(), 0);
         assert_eq!(f.clsid(), DUMMY_VT.clsid);
+    }
+
+    #[test]
+    fn vtable_create_yields_fresh_instance() {
+        let inst = (DUMMY_VT.create)();
+        assert_eq!(inst.refcount(), 0);
+        assert_eq!(inst.state(), State::Uninitialized);
+
+        // Distinct calls return distinct objects, both starting at 0.
+        let other = (DUMMY_VT.create)();
+        inst.add_ref();
+        assert_eq!(inst.refcount(), 1);
+        assert_eq!(other.refcount(), 0);
     }
 }
