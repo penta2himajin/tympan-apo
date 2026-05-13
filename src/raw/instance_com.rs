@@ -8,13 +8,15 @@
 //!
 //! ## Implementation status
 //!
-//! This PR lands the macro plumbing — the wrapper struct, the
-//! `#[implement(IAudioProcessingObject)]` annotation, and the
-//! seven trait methods. Several method bodies are still stubs
-//! returning `E_NOTIMPL` while the format-negotiation /
-//! registration-properties translation layers are designed in
-//! follow-ups; the trivially-correct ones (`Reset`, `GetLatency`,
-//! `GetInputChannelCount`) are wired up.
+//! `Reset`, `GetLatency`, `Initialize`, `IsInputFormatSupported`,
+//! `IsOutputFormatSupported`, `GetInputChannelCount`,
+//! `LockForProcess`, `UnlockForProcess`, `APOProcess`,
+//! `CalcInputFrames`, and `CalcOutputFrames` are wired through to
+//! the user APO via [`AnyApoInstance`]. The format-negotiation
+//! pair routes through the [`crate::raw::media_type`] bridge.
+//! `GetRegistrationProperties` is the only remaining `E_NOTIMPL`
+//! stub and is the subject of the follow-up
+//! `APO_REG_PROPERTIES` builder PR.
 
 // The `windows_core::implement` proc-macro generates a sibling
 // `*_Impl` struct without doc-comments; the crate-wide
@@ -114,33 +116,46 @@ impl IAudioProcessingObject_Impl for ApoInstanceCom_Impl {
     fn IsInputFormatSupported(
         &self,
         _poppositeformat: Ref<IAudioMediaType>,
-        _prequestedinputformat: Ref<IAudioMediaType>,
+        prequestedinputformat: Ref<IAudioMediaType>,
     ) -> windows_core::Result<IAudioMediaType> {
-        Err(windows_core::Error::new(
-            HRESULT::from(HResult::E_NOTIMPL),
-            "IAudioMediaType <-> Format bridge not yet implemented",
-        ))
+        // The framework currently ignores `poppositeformat` —
+        // negotiation only consults the requested input format
+        // and trusts the user's `ProcessingObject::is_input_format_supported`
+        // for the verdict. A future revision can refine the
+        // contract by surfacing the opposite format to the user.
+        crate::raw::media_type::negotiate_format(
+            self.instance.as_ref(),
+            prequestedinputformat,
+            crate::raw::media_type::NegotiationDirection::Input,
+        )
     }
 
     fn IsOutputFormatSupported(
         &self,
         _poppositeformat: Ref<IAudioMediaType>,
-        _prequestedoutputformat: Ref<IAudioMediaType>,
+        prequestedoutputformat: Ref<IAudioMediaType>,
     ) -> windows_core::Result<IAudioMediaType> {
-        Err(windows_core::Error::new(
-            HRESULT::from(HResult::E_NOTIMPL),
-            "IAudioMediaType <-> Format bridge not yet implemented",
-        ))
+        crate::raw::media_type::negotiate_format(
+            self.instance.as_ref(),
+            prequestedoutputformat,
+            crate::raw::media_type::NegotiationDirection::Output,
+        )
     }
 
     fn GetInputChannelCount(&self) -> windows_core::Result<u32> {
-        // The audio engine queries this after LockForProcess;
-        // the framework can answer once the locked input format
-        // is cached on AnyApoInstance. Stubbed until then.
-        Err(windows_core::Error::new(
-            HRESULT::from(HResult::APOERR_NOT_LOCKED),
-            "GetInputChannelCount called before LockForProcess wiring lands",
-        ))
+        // The audio engine queries this after LockForProcess.
+        // Read the channel count out of the cached negotiated
+        // input format; the cache is populated whenever the cell
+        // is in `State::Locked` and cleared on `UnlockForProcess`.
+        self.instance
+            .locked_formats()
+            .map(|f| u32::from(f.input.channels()))
+            .ok_or_else(|| {
+                windows_core::Error::new(
+                    HRESULT::from(HResult::APOERR_NOT_LOCKED),
+                    "GetInputChannelCount called outside of the Locked state",
+                )
+            })
     }
 }
 
@@ -421,5 +436,88 @@ mod tests {
         let arc2 = com.instance();
         // Both references address the same Arc.
         assert!(Arc::ptr_eq(arc1, arc2));
+    }
+
+    /// IAudioProcessingObject::IsInputFormatSupported routes through
+    /// the COM vtable, into AnyApoInstance, and back out as a fresh
+    /// IAudioMediaType. The end-to-end vtable hop is what we exercise
+    /// here — the bridge's `negotiate_format` helper is covered by
+    /// `crate::raw::media_type::tests` in isolation.
+    #[test]
+    fn is_input_format_supported_routes_float32_as_accept() {
+        use crate::format::Format;
+        use crate::raw::media_type::media_type_from_format;
+        use windows::Win32::Media::Audio::Apo::IAudioProcessingObject;
+        use windows_core::ComObject;
+
+        let apo: IAudioProcessingObject = ComObject::new(new_com()).into_interface();
+        let requested = media_type_from_format(&Format::pcm_float32(48_000, 1));
+        // Safety: live IAudioProcessingObject vtable; opposite-format
+        // pointer is allowed to be null per the audio engine
+        // contract.
+        let answered = unsafe { apo.IsInputFormatSupported(None, &requested) }.unwrap();
+        // Safety: `answered` is live for the borrow.
+        let wf = unsafe { &*answered.GetAudioFormat() };
+        assert_eq!(
+            Format::from_waveformatex(wf),
+            Format::pcm_float32(48_000, 1)
+        );
+    }
+
+    #[test]
+    fn is_input_format_supported_suggests_float32_for_int16() {
+        use crate::format::{Format, WAVE_FORMAT_IEEE_FLOAT};
+        use crate::raw::media_type::media_type_from_format;
+        use windows::Win32::Media::Audio::Apo::IAudioProcessingObject;
+        use windows_core::ComObject;
+
+        let apo: IAudioProcessingObject = ComObject::new(new_com()).into_interface();
+        let requested = media_type_from_format(&Format::pcm_int16(48_000, 1));
+        // Safety: live IAudioProcessingObject vtable.
+        let answered = unsafe { apo.IsInputFormatSupported(None, &requested) }.unwrap();
+        // Safety: `answered` is live for the borrow.
+        let wf = unsafe { &*answered.GetAudioFormat() };
+        let suggested = Format::from_waveformatex(wf);
+        assert_eq!(suggested.format_tag(), WAVE_FORMAT_IEEE_FLOAT);
+        assert_eq!(suggested.bits_per_sample(), 32);
+        assert_eq!(suggested.sample_rate(), 48_000);
+        assert_eq!(suggested.channels(), 1);
+    }
+
+    #[test]
+    fn get_input_channel_count_errors_before_lock() {
+        use windows::Win32::Media::Audio::Apo::IAudioProcessingObject;
+        use windows_core::ComObject;
+
+        let apo: IAudioProcessingObject = ComObject::new(new_com()).into_interface();
+        // Safety: live IAudioProcessingObject vtable.
+        let err = unsafe { apo.GetInputChannelCount() }.unwrap_err();
+        assert_eq!(err.code(), HRESULT::from(HResult::APOERR_NOT_LOCKED));
+    }
+
+    #[test]
+    fn get_input_channel_count_reports_locked_channel_count() {
+        use crate::format::Format;
+
+        let com = new_com();
+        com.instance().initialize().unwrap();
+        // 6-channel float32 input, mono output — exercises that the
+        // method reads the input side specifically.
+        com.instance()
+            .lock_for_process(
+                &Format::pcm_float32(48_000, 6),
+                &Format::pcm_float32(48_000, 1),
+            )
+            .unwrap();
+        // Direct call into the impl method via the macro-generated
+        // _Impl Deref. Going through the vtable would also work,
+        // but we already cover that hop in
+        // `is_input_format_supported_routes_float32_as_accept`.
+        use windows::Win32::Media::Audio::Apo::IAudioProcessingObject;
+        use windows_core::ComObject;
+        let apo: IAudioProcessingObject = ComObject::new(com).into_interface();
+        // Safety: live IAudioProcessingObject vtable.
+        let count = unsafe { apo.GetInputChannelCount() }.unwrap();
+        assert_eq!(count, 6);
     }
 }
