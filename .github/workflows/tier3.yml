@@ -1,0 +1,72 @@
+name: Tier 3
+
+# In-process COM activation lifecycle harness per
+# docs/decisions/0001-ci-verification-strategy.md § Tier 3.
+# Runs on merges to main, on a daily schedule, and on every pull
+# request that touches the harness or the framework code that feeds
+# into it. ADR 0001 designates Tier 3 as non-blocking for PR merge —
+# we do not gate the merge-queue on this workflow.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # 06:00 UTC daily.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tier3-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: short
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  tier3:
+    name: Lifecycle harness + realtime-safety guard (windows-2025)
+    runs-on: windows-2025
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: tier3
+
+      - name: Build passthrough example cdylib (release)
+        run: cargo build --release --target x86_64-pc-windows-msvc --example passthrough
+
+      - name: Run Tier 3 lifecycle test (LoadLibrary + CoCreateInstance + full lifecycle)
+        shell: pwsh
+        env:
+          # The test loads the cdylib by absolute path. The release
+          # build of the example always lands at this location for
+          # `cargo build --example passthrough`.
+          TYMPAN_PASSTHROUGH_DLL: ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release\examples\passthrough.dll
+        run: |
+          if (-not (Test-Path $env:TYMPAN_PASSTHROUGH_DLL)) {
+            Write-Error "::error::Expected DLL not found at $env:TYMPAN_PASSTHROUGH_DLL"
+            exit 1
+          }
+          cargo test --release --target x86_64-pc-windows-msvc --test tier3_lifecycle -- --nocapture
+
+      - name: Run realtime-safety test (rlib path under assert_no_alloc)
+        # Debug profile so the assert_no_alloc cfg gate is active.
+        # The framework's `[profile.dev]` already sets `panic = "abort"`,
+        # which assert_no_alloc requires for its on-violation behaviour.
+        run: cargo test --target x86_64-pc-windows-msvc --test realtime_safety -- --nocapture

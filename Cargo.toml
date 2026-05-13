@@ -41,6 +41,7 @@ version = "0.62"
 features = [
     "Win32_Foundation",
     "Win32_System_Com",
+    "Win32_System_LibraryLoader",
     "Win32_Media_Audio",
     "Win32_Media_Audio_Apo",
     "Win32_Media_KernelStreaming",
@@ -55,6 +56,11 @@ crossbeam-utils = { version = "0.8", default-features = false }
 
 [dev-dependencies]
 static_assertions = "1.1"
+# Global-allocator wrapper that aborts inside an
+# `assert_no_alloc(|| { ... })` span when an allocation traverses
+# the hook. Wired up in `tests/realtime_safety.rs` to enforce
+# CLAUDE.md prohibition #1.
+assert_no_alloc = "1.1"
 
 [profile.release]
 lto = "thin"

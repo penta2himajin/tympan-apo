@@ -27,15 +27,27 @@ impl RealtimeContext {
     ///
     /// # Safety
     ///
-    /// The caller must guarantee that the current thread is the
-    /// Windows audio engine's realtime thread (i.e. the call stack
-    /// originated from `IAudioProcessingObjectRT::APOProcess`). The
-    /// constructor is `pub(crate)` so that only the framework's COM
-    /// harness can satisfy this contract; user code receives the
-    /// witness by reference rather than constructing one.
+    /// The caller must guarantee one of the following holds:
+    ///
+    /// 1. The current thread is the Windows audio engine's realtime
+    ///    thread, i.e. the call stack originated from
+    ///    `IAudioProcessingObjectRT::APOProcess`. The framework's
+    ///    COM harness invokes this constructor exactly in that
+    ///    position; user code receives the witness by reference
+    ///    rather than constructing one of its own.
+    /// 2. The caller is an integration test or benchmark driving the
+    ///    framework's `process` path in-process, with full knowledge
+    ///    that allocation- and lock-free guarantees only apply to
+    ///    code paths reachable from the audio thread; tests that
+    ///    perform allocations outside the realtime span are free to.
+    ///
+    /// Holding a `&RealtimeContext` does not in itself prevent
+    /// allocation — it makes the requirement explicit at every
+    /// call site that takes one. Mechanical enforcement lives in
+    /// `tests/realtime_safety.rs` via the `assert_no_alloc`
+    /// global-allocator guard.
     #[inline]
-    #[allow(dead_code)] // wired up once the raw COM harness lands
-    pub(crate) unsafe fn new_unchecked() -> Self {
+    pub unsafe fn new_unchecked() -> Self {
         Self {
             _not_send_sync: PhantomData,
         }
