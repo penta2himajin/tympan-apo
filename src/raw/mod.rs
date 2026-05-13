@@ -17,6 +17,7 @@
 
 pub mod abi;
 pub mod class_factory;
+pub mod dispatch;
 pub mod exports;
 pub mod instance_com;
 pub mod media_type;
