@@ -18,10 +18,25 @@
 //!   [`dll_unregister_server_dispatch`] — registry-side
 //!   self-registration, delegating to
 //!   [`crate::raw::register`].
+//! - [`dll_can_unload_now_dispatch`] — process-wide
+//!   "is anyone holding an APO instance" probe.
+//!
+//! ## Outstanding-instance counter
+//!
+//! The COM contract for `DllCanUnloadNow` is inherently
+//! process-global: the COM loader asks "are there any live
+//! references from this DLL?" and expects a single answer. The
+//! framework tracks this with one `AtomicU32` per cdylib,
+//! incremented by `ApoInstanceCom::new` and decremented by its
+//! `Drop`. CLAUDE.md's prohibition on global state applies to
+//! APO instance data (which is per-object), not to the single
+//! boolean fact "does this DLL still have live instances", which
+//! the COM contract forces to be process-global.
 
 extern crate alloc;
 
 use core::ffi::c_void;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::System::LibraryLoader::{
@@ -87,6 +102,54 @@ pub unsafe fn dll_get_class_object_dispatch(
     // Safety: unknown is a valid IUnknown pointer; the COM
     // caller guarantees `riid` and `ppv` are valid.
     unsafe { unknown.query(riid, ppv) }
+}
+
+/// Per-cdylib counter of `ApoInstanceCom` objects currently held
+/// by COM callers.
+///
+/// `ApoInstanceCom::new` increments this; its `Drop` decrements it.
+/// `dll_can_unload_now_dispatch` reads it to decide whether the
+/// DLL is safe to unload.
+static OUTSTANDING: AtomicU32 = AtomicU32::new(0);
+
+/// Increment the outstanding-instance counter.
+///
+/// Intended for use by [`crate::raw::instance_com::ApoInstanceCom::new`].
+/// `Relaxed` is sufficient: we only need the total count, not any
+/// happens-before relationship between increments.
+pub fn outstanding_inc() {
+    OUTSTANDING.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Decrement the outstanding-instance counter.
+///
+/// Symmetric counterpart to [`outstanding_inc`]; called from
+/// `Drop for ApoInstanceCom`.
+pub fn outstanding_dec() {
+    OUTSTANDING.fetch_sub(1, Ordering::Relaxed);
+}
+
+/// Current value of the outstanding-instance counter. Test
+/// hook; production code reads this through
+/// [`dll_can_unload_now_dispatch`].
+#[must_use]
+pub fn outstanding_count() -> u32 {
+    OUTSTANDING.load(Ordering::Relaxed)
+}
+
+/// `DllCanUnloadNow` dispatch: returns `S_OK` (0) when no
+/// `ApoInstanceCom` is outstanding, `S_FALSE` (1) otherwise.
+///
+/// The COM loader honours `S_OK` by unloading the DLL once no
+/// other consumers are holding references; `S_FALSE` keeps the
+/// DLL pinned. This is the standard COM in-process server
+/// convention.
+pub fn dll_can_unload_now_dispatch() -> HRESULT {
+    if outstanding_count() == 0 {
+        HRESULT(0) // S_OK
+    } else {
+        HRESULT(1) // S_FALSE
+    }
 }
 
 /// `DllRegisterServer` dispatch: writes each `ApoVTable` in

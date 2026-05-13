@@ -110,17 +110,18 @@ macro_rules! register_apo {
 
         /// COM unload-readiness query.
         ///
-        /// Returns `S_FALSE` (1) to keep the DLL loaded — the
-        /// outstanding-instance counter is wired in a follow-up
-        /// PR; until then, the DLL never reports itself as
-        /// unloadable.
+        /// Returns `S_OK` (0) when no `ApoInstanceCom` is
+        /// outstanding (the COM loader may unload the DLL),
+        /// `S_FALSE` (1) otherwise. The counter is maintained in
+        /// [`tympan_apo::raw::exports`] via per-instance inc/dec
+        /// in `ApoInstanceCom::new` / `Drop`.
         ///
         /// # Safety
         ///
         /// Called by COM; takes no parameters.
         #[no_mangle]
         pub unsafe extern "system" fn DllCanUnloadNow() -> $crate::HRESULT {
-            $crate::HRESULT(1)
+            $crate::raw::exports::dll_can_unload_now_dispatch()
         }
 
         /// COM self-registration entry point.
