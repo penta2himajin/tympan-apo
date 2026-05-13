@@ -1,9 +1,15 @@
 //! Top-level Audio Processing Object surface.
 //!
-//! This module will host the `ProcessingObject` trait and lifecycle
-//! types that users implement. The trait itself, along with the
-//! `process()` IO types, lands once the realtime IO buffer
-//! abstractions exist; for now only the supporting enums are here.
+//! Users of the framework implement [`ProcessingObject`] for a
+//! type carrying the per-instance state of their APO. The
+//! framework's COM harness will (in a follow-up PR) construct an
+//! instance via [`ProcessingObject::new`], drive the lifecycle, and
+//! forward audio buffers into [`ProcessingObject::process`].
+
+use crate::clsid::Clsid;
+use crate::error::HResult;
+use crate::format::{Format, FormatNegotiation};
+use crate::realtime::RealtimeContext;
 
 /// Category of an Audio Processing Object, as exposed via
 /// `IAudioSystemEffects` / `IAudioSystemEffects3`.
@@ -31,14 +37,248 @@ pub enum ApoCategory {
     Efx,
 }
 
+/// User-implemented Audio Processing Object.
+///
+/// Each implementor represents one CLSID-identified APO with a
+/// distinct name, category, and processing behaviour. The
+/// framework's COM harness instantiates the type via
+/// [`Self::new`], drives the format-negotiation /
+/// `LockForProcess` / `APOProcess` / `UnlockForProcess` sequence,
+/// and routes the audio engine's calls into the corresponding
+/// trait methods.
+///
+/// ## Default format negotiation
+///
+/// The default [`Self::is_input_format_supported`] /
+/// [`Self::is_output_format_supported`] implementations accept any
+/// IEEE-float32 stream and suggest a float32 alternative for
+/// anything else. This matches the canonical Windows audio engine
+/// negotiation and is the format the [`Self::process`] callback's
+/// `&[f32]` / `&mut [f32]` parameters assume.
+///
+/// Implementors that want to handle integer PCM or other formats
+/// directly should override these methods and use [`Format`]'s
+/// accessors to do their own typed slicing inside `process`.
+///
+/// ## Realtime safety
+///
+/// [`Self::process`] takes a [`RealtimeContext`] reference. Any
+/// helper function callable from `process` should also accept
+/// `&RealtimeContext`, which makes its presence in the call stack
+/// visible at compile time. The realtime path must be
+/// allocation-free and lock-free per `CLAUDE.md` prohibitions 1
+/// and 2.
+pub trait ProcessingObject: Sized + Send {
+    /// CLSID under which the audio engine and `regsvr32` identify
+    /// this APO. Must be unique per implementor.
+    const CLSID: Clsid;
+
+    /// Human-readable APO name. Surfaced in `Sound Settings` and
+    /// elsewhere in the Windows audio UI.
+    const NAME: &'static str;
+
+    /// Copyright notice carried in the registered class metadata.
+    const COPYRIGHT: &'static str;
+
+    /// Category controlling where in the per-stream processing
+    /// graph the APO sits — see [`ApoCategory`].
+    const CATEGORY: ApoCategory;
+
+    /// Construct a fresh APO instance.
+    ///
+    /// Called by the framework's class factory once per
+    /// `CoCreateInstance` invocation from the audio engine. Heap
+    /// allocation is allowed here; it is *not* allowed inside
+    /// [`Self::process`].
+    fn new() -> Self;
+
+    /// Decide whether `format` is acceptable as an input format.
+    ///
+    /// The default implementation accepts any IEEE-float32 stream
+    /// and suggests `pcm_float32(format.sample_rate(),
+    /// format.channels())` otherwise.
+    fn is_input_format_supported(&self, format: &Format) -> FormatNegotiation {
+        default_float32_negotiation(format)
+    }
+
+    /// Decide whether `format` is acceptable as an output format.
+    ///
+    /// The default implementation mirrors
+    /// [`Self::is_input_format_supported`].
+    fn is_output_format_supported(&self, format: &Format) -> FormatNegotiation {
+        default_float32_negotiation(format)
+    }
+
+    /// Prepare for processing under the supplied input/output
+    /// formats.
+    ///
+    /// Called once between `Initialize` and the first
+    /// [`Self::process`] invocation. This is where implementors
+    /// should pre-allocate internal buffers; allocation in
+    /// [`Self::process`] is prohibited.
+    ///
+    /// Returning an [`HResult`] failure aborts lock and surfaces
+    /// to the audio engine as an `IsInitialized=FALSE` state.
+    fn lock_for_process(&mut self, input: &Format, output: &Format) -> Result<(), HResult> {
+        let _ = (input, output);
+        Ok(())
+    }
+
+    /// Release any resources acquired during
+    /// [`Self::lock_for_process`].
+    ///
+    /// Always paired with a prior successful `lock_for_process`.
+    /// Allocator use is allowed.
+    fn unlock_for_process(&mut self) {}
+
+    /// Process one audio buffer.
+    ///
+    /// Realtime-critical: must be allocation-free, lock-free, and
+    /// must not call into the kernel. Reachable callees should
+    /// take `&RealtimeContext` to make the constraint visible
+    /// throughout the call graph.
+    ///
+    /// `input` and `output` are interleaved float32 sample
+    /// buffers — `frame_count * channel_count` samples each. The
+    /// framework verifies they are the same length before
+    /// dispatch; implementors may rely on it.
+    fn process(&mut self, rt: &RealtimeContext, input: &[f32], output: &mut [f32]);
+}
+
+#[inline]
+fn default_float32_negotiation(format: &Format) -> FormatNegotiation {
+    if format.is_float() && format.bits_per_sample() == 32 {
+        FormatNegotiation::Accept
+    } else {
+        FormatNegotiation::Suggest(Format::pcm_float32(format.sample_rate(), format.channels()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reference implementor used by the trait's unit tests.
+    /// Copies input straight to output frame-by-frame.
+    struct Passthrough;
+
+    impl ProcessingObject for Passthrough {
+        const CLSID: Clsid = Clsid::from_u128(0xCAFEBABE_DEAD_BEEF_1234_56789ABCDEF0);
+        const NAME: &'static str = "tympan-apo passthrough";
+        const COPYRIGHT: &'static str = "test fixture";
+        const CATEGORY: ApoCategory = ApoCategory::Sfx;
+
+        fn new() -> Self {
+            Self
+        }
+
+        fn process(&mut self, _rt: &RealtimeContext, input: &[f32], output: &mut [f32]) {
+            output.copy_from_slice(input);
+        }
+    }
 
     #[test]
     fn variants_are_distinct() {
         assert_ne!(ApoCategory::Sfx, ApoCategory::Mfx);
         assert_ne!(ApoCategory::Mfx, ApoCategory::Efx);
         assert_ne!(ApoCategory::Sfx, ApoCategory::Efx);
+    }
+
+    #[test]
+    fn associated_constants_round_trip() {
+        assert_eq!(Passthrough::NAME, "tympan-apo passthrough");
+        assert_eq!(Passthrough::COPYRIGHT, "test fixture");
+        assert_eq!(Passthrough::CATEGORY, ApoCategory::Sfx);
+        assert!(!Passthrough::CLSID.is_nil());
+    }
+
+    #[test]
+    fn default_input_format_accepts_float32_at_any_rate_channels() {
+        let apo = Passthrough::new();
+        for (rate, ch) in [(48_000, 1), (44_100, 2), (96_000, 6), (192_000, 8)] {
+            assert_eq!(
+                apo.is_input_format_supported(&Format::pcm_float32(rate, ch)),
+                FormatNegotiation::Accept,
+                "float32 {rate} Hz × {ch} ch must be accepted",
+            );
+        }
+    }
+
+    #[test]
+    fn default_input_format_suggests_float32_for_int_pcm() {
+        let apo = Passthrough::new();
+        for fmt in [
+            Format::pcm_int16(48_000, 2),
+            Format::pcm_int24(44_100, 1),
+            Format::pcm_int32(96_000, 4),
+        ] {
+            match apo.is_input_format_supported(&fmt) {
+                FormatNegotiation::Suggest(suggested) => {
+                    assert!(suggested.is_float(), "suggestion must be float");
+                    assert_eq!(suggested.bits_per_sample(), 32);
+                    assert_eq!(suggested.sample_rate(), fmt.sample_rate());
+                    assert_eq!(suggested.channels(), fmt.channels());
+                }
+                other => panic!("expected Suggest for {fmt:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn default_input_format_suggests_float32_for_float64() {
+        // Even float-but-wrong-width formats must be steered to
+        // float32.
+        let apo = Passthrough::new();
+        let f = Format::pcm_float64(48_000, 1);
+        match apo.is_input_format_supported(&f) {
+            FormatNegotiation::Suggest(s) => {
+                assert!(s.is_float());
+                assert_eq!(s.bits_per_sample(), 32);
+            }
+            other => panic!("expected Suggest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn default_output_negotiation_matches_input() {
+        let apo = Passthrough::new();
+        for fmt in [
+            Format::pcm_float32(48_000, 1),
+            Format::pcm_int16(44_100, 2),
+            Format::pcm_float64(96_000, 6),
+        ] {
+            assert_eq!(
+                apo.is_input_format_supported(&fmt),
+                apo.is_output_format_supported(&fmt),
+            );
+        }
+    }
+
+    #[test]
+    fn default_lock_for_process_succeeds() {
+        let mut apo = Passthrough::new();
+        let fmt = Format::pcm_float32(48_000, 1);
+        assert!(apo.lock_for_process(&fmt, &fmt).is_ok());
+    }
+
+    #[test]
+    fn default_unlock_is_callable() {
+        let mut apo = Passthrough::new();
+        apo.unlock_for_process();
+    }
+
+    #[test]
+    fn process_runs_against_a_synthetic_buffer() {
+        // The realtime witness can be constructed in tests via
+        // the crate-private `new_unchecked` constructor; this is
+        // the only path that bypasses the contract, and it is
+        // permitted here because the test exercises pure logic,
+        // not realtime-thread-dependent behaviour.
+        let mut apo = Passthrough::new();
+        let input = [0.1_f32, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7, -0.8];
+        let mut output = [0.0_f32; 8];
+        let rt = unsafe { RealtimeContext::new_unchecked() };
+        apo.process(&rt, &input, &mut output);
+        assert_eq!(output, input);
     }
 }

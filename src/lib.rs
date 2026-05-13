@@ -46,7 +46,7 @@ pub mod raw;
 #[cfg_attr(docsrs, doc(cfg(all(windows, feature = "aec"))))]
 pub mod aec;
 
-pub use apo::ApoCategory;
+pub use apo::{ApoCategory, ProcessingObject};
 pub use clsid::Clsid;
 pub use error::HResult;
 pub use format::{Format, FormatNegotiation};
