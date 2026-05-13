@@ -19,11 +19,16 @@
 //!
 //! ## Current state
 //!
-//! `CreateInstance` returns `CLASS_E_CLASSNOTAVAILABLE` while the
-//! IUnknown wrapper for [`crate::instance::ApoInstance`] is still
-//! under construction. `LockServer` is functional and increments
-//! the per-factory `server_lock` counter that
-//! `DllCanUnloadNow` will consult.
+//! `CreateInstance` calls `ApoVTable::create` to mint a fresh
+//! `Arc<dyn AnyApoInstance>`, wraps it in an
+//! [`crate::raw::instance_com::ApoInstanceCom`] COM object, and
+//! routes the resulting `IUnknown` through `QueryInterface` to
+//! return the interface requested by the caller. Aggregation
+//! (`punkouter != NULL`) is rejected with `CLASS_E_NOAGGREGATION`,
+//! matching standard COM convention.
+//!
+//! `LockServer` is functional and increments the per-factory
+//! `server_lock` counter that `DllCanUnloadNow` will consult.
 
 // The `windows_core::implement` proc-macro generates a sibling
 // `*_Impl` struct that does not carry doc-comments; the crate-wide
@@ -34,7 +39,7 @@ use alloc::sync::Arc;
 use core::ffi::c_void;
 
 use windows::Win32::System::Com::{IClassFactory, IClassFactory_Impl};
-use windows_core::{implement, IUnknown, Ref, BOOL, GUID, HRESULT};
+use windows_core::{implement, ComObject, IUnknown, Interface, Ref, BOOL, GUID, HRESULT};
 
 extern crate alloc;
 
@@ -42,6 +47,7 @@ use crate::apo::ApoCategory;
 use crate::clsid::Clsid;
 use crate::error::HResult;
 use crate::instance::AnyApoInstance;
+use crate::raw::instance_com::ApoInstanceCom;
 use crate::realtime::Refcount;
 
 /// VTable-style metadata describing one user APO.
@@ -127,22 +133,45 @@ impl IClassFactory_Impl for ApoClassFactory_Impl {
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn CreateInstance(
         &self,
-        _punkouter: Ref<IUnknown>,
-        _riid: *const GUID,
+        punkouter: Ref<IUnknown>,
+        riid: *const GUID,
         ppvobject: *mut *mut c_void,
     ) -> windows_core::Result<()> {
-        // Zero the out-pointer per the COM contract on failure.
-        if !ppvobject.is_null() {
-            // Safety: the COM caller guarantees `ppvobject` points
-            // to a writable pointer slot.
-            unsafe {
-                *ppvobject = core::ptr::null_mut();
-            }
+        // Defensive: the COM caller is supposed to hand us a
+        // writable slot. Bail if not.
+        if ppvobject.is_null() {
+            return Err(windows_core::Error::new(
+                HRESULT::from(HResult::E_POINTER),
+                "ppvobject is null",
+            ));
         }
-        Err(windows_core::Error::new(
-            HRESULT::from(HResult::CLASS_E_CLASSNOTAVAILABLE),
-            "ApoInstance IUnknown wrapper not yet implemented",
-        ))
+        // Zero the out-pointer per the COM contract; we'll
+        // overwrite it on success.
+        // Safety: ppvobject is non-null and the COM caller
+        // guarantees it points to a writable pointer slot.
+        unsafe {
+            *ppvobject = core::ptr::null_mut();
+        }
+
+        // We do not support COM aggregation.
+        if !punkouter.is_null() {
+            return Err(windows_core::Error::new(
+                HRESULT::from(HResult::CLASS_E_NOAGGREGATION),
+                "ApoClassFactory does not support aggregation",
+            ));
+        }
+
+        // Materialise a fresh APO instance and wrap it for COM.
+        let inner = (self.vtable.create)();
+        let com_object = ComObject::new(ApoInstanceCom::new(inner));
+        let unknown: IUnknown = com_object.into_interface();
+
+        // Route the requested IID through IUnknown::QueryInterface
+        // so the caller gets whichever supported interface it
+        // asked for (IUnknown, IAudioProcessingObject, ...).
+        // Safety: `unknown` is a valid IUnknown pointer; the
+        // COM caller guarantees `riid` and `ppvobject` are valid.
+        unsafe { unknown.query(riid, ppvobject) }.ok()
     }
 
     fn LockServer(&self, flock: BOOL) -> windows_core::Result<()> {
