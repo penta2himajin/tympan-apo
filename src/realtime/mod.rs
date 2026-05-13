@@ -16,6 +16,8 @@
 
 mod context;
 mod ring;
+mod state;
 
 pub use context::RealtimeContext;
 pub use ring::{spsc, Consumer, Producer};
+pub use state::{State, StateCell, TransitionError};
