@@ -15,5 +15,7 @@
 //! behind `#[cfg(windows)]`.
 
 mod context;
+mod ring;
 
 pub use context::RealtimeContext;
+pub use ring::{spsc, Consumer, Producer};
