@@ -1,5 +1,7 @@
 # Architecture
 
+*Read this in other languages: [日本語](ja/architecture.md).*
+
 This document describes the planned architecture. Implementation has not
 begun. Details may change as design feedback accumulates.
 

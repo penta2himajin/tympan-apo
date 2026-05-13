@@ -1,5 +1,7 @@
 # tympan-apo
 
+*Read this in other languages: [日本語](README.ja.md).*
+
 A Rust framework for writing Windows Audio Processing Objects (APOs).
 
 `tympan-apo` provides Rust abstractions over the Windows Audio Processing
