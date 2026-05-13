@@ -59,13 +59,31 @@ impl<'a> ProcessInput<'a> {
     }
 }
 
+/// On/off state of a [`SystemEffect`].
+///
+/// Mirrors the Windows `AUDIO_SYSTEMEFFECT_STATE` enumeration:
+/// `Off = 0`, `On = 1`. The framework converts between the two
+/// representations at the COM boundary so the user-facing API
+/// stays cross-platform.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Default)]
+pub enum SystemEffectState {
+    /// Effect is currently off; the user-side `process` may skip
+    /// the per-effect work.
+    Off,
+    /// Effect is currently on; the user-side `process` should
+    /// apply the effect normally.
+    #[default]
+    On,
+}
+
 /// One system effect this APO advertises to the audio engine via
-/// `IAudioSystemEffects2::GetEffectsList`.
+/// `IAudioSystemEffects2::GetEffectsList` and (when this APO
+/// supports per-effect toggling) `IAudioSystemEffects3::GetControllableSystemEffectsList`.
 ///
 /// The Windows audio engine surfaces these in the Sound Settings
 /// UI; users can see the effect by name (resolved via the
-/// per-effect ID in the audio property store) and — for APOs that
-/// implement `IAudioSystemEffects3` — toggle each independently.
+/// per-effect ID in the audio property store) and — for effects
+/// marked `controllable` — toggle each independently.
 ///
 /// The framework's default `ProcessingObject::system_effects`
 /// returns an empty slice, so an APO advertises no enumerable
@@ -77,14 +95,44 @@ pub struct SystemEffect {
     /// engine pairs this with the friendly name in the per-endpoint
     /// `AudioSystemEffects_PropertyStore` to render the UI.
     pub id: Clsid,
+    /// `true` if the audio engine may call
+    /// `SetAudioSystemEffectState` on this effect at runtime.
+    /// `false` means the effect is always on and the Sound Settings
+    /// UI hides the toggle.
+    pub controllable: bool,
+    /// Initial state of the effect, also surfaced through
+    /// `GetControllableSystemEffectsList`.
+    pub state: SystemEffectState,
 }
 
 impl SystemEffect {
-    /// Construct an effect descriptor from its unique ID.
+    /// Construct an effect descriptor from its unique ID. Defaults
+    /// to non-controllable, `On` state — the v1/v2 behaviour where
+    /// effects are always-on markers in the discovery list.
     #[inline]
     #[must_use]
     pub const fn new(id: Clsid) -> Self {
-        Self { id }
+        Self {
+            id,
+            controllable: false,
+            state: SystemEffectState::On,
+        }
+    }
+
+    /// Builder-style: mark this effect as user-controllable.
+    #[inline]
+    #[must_use]
+    pub const fn with_controllable(mut self, controllable: bool) -> Self {
+        self.controllable = controllable;
+        self
+    }
+
+    /// Builder-style: set the initial state.
+    #[inline]
+    #[must_use]
+    pub const fn with_state(mut self, state: SystemEffectState) -> Self {
+        self.state = state;
+        self
     }
 }
 
@@ -199,6 +247,28 @@ pub trait ProcessingObject: Sized + Send {
     /// constant slice is allocation-free).
     fn system_effects(&self) -> &[SystemEffect] {
         &[]
+    }
+
+    /// Toggle the state of one of this APO's advertised effects.
+    ///
+    /// Called by the audio engine through
+    /// `IAudioSystemEffects3::SetAudioSystemEffectState` whenever
+    /// the user flips an effect toggle in the Sound Settings UI.
+    /// The framework dispatches into this method only for effects
+    /// the user advertised with `controllable: true`; if `id` does
+    /// not match any advertised effect the framework returns
+    /// `E_INVALIDARG` and does not invoke the method.
+    ///
+    /// The default implementation is a no-op. Implementors that
+    /// want to react to state changes (skip processing when off,
+    /// reload internal state, etc.) override this method.
+    ///
+    /// Called from a non-realtime thread and may race with the
+    /// realtime `process` callback. Implementors that read effect
+    /// state from `process` should mediate via atomics or a
+    /// realtime-safe primitive.
+    fn set_system_effect_state(&mut self, id: &Clsid, state: SystemEffectState) {
+        let _ = (id, state);
     }
 
     /// Prepare for processing under the supplied input/output

@@ -23,7 +23,8 @@ use core::ptr;
 
 use windows::Win32::Media::Audio::Apo::{
     IAudioProcessingObject, IAudioProcessingObjectConfiguration, IAudioProcessingObjectRT,
-    IAudioSystemEffects, IAudioSystemEffects2, APO_FLAG_NONE, APO_REG_PROPERTIES,
+    IAudioSystemEffects, IAudioSystemEffects2, IAudioSystemEffects3, APO_FLAG_NONE,
+    APO_REG_PROPERTIES,
 };
 use windows::Win32::System::Com::CoTaskMemAlloc;
 use windows_core::{Interface, GUID, HRESULT};
@@ -37,13 +38,14 @@ use crate::instance::AnyApoInstance;
 /// [`crate::raw::instance_com::ApoInstanceCom`]. The audio engine
 /// does not require a specific ordering, but keeping the two in
 /// sync avoids surprises.
-fn supported_interfaces() -> [GUID; 5] {
+fn supported_interfaces() -> [GUID; 6] {
     [
         IAudioProcessingObject::IID,
         IAudioProcessingObjectConfiguration::IID,
         IAudioProcessingObjectRT::IID,
         IAudioSystemEffects::IID,
         IAudioSystemEffects2::IID,
+        IAudioSystemEffects3::IID,
     ]
 }
 
@@ -248,7 +250,7 @@ mod tests {
             assert_eq!((*props).u32MinOutputConnections, 1);
             assert_eq!((*props).u32MaxOutputConnections, 1);
             assert_eq!((*props).u32MaxInstances, 0);
-            assert_eq!((*props).u32NumAPOInterfaces, 5);
+            assert_eq!((*props).u32NumAPOInterfaces, 6);
             drop_properties(props);
         }
     }
@@ -291,6 +293,7 @@ mod tests {
             assert_eq!(*head.add(2), IAudioProcessingObjectRT::IID);
             assert_eq!(*head.add(3), IAudioSystemEffects::IID);
             assert_eq!(*head.add(4), IAudioSystemEffects2::IID);
+            assert_eq!(*head.add(5), IAudioSystemEffects3::IID);
             drop_properties(props);
         }
     }

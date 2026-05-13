@@ -30,10 +30,14 @@ use windows::Win32::Media::Audio::Apo::{
     IAudioMediaType, IAudioProcessingObject, IAudioProcessingObjectConfiguration,
     IAudioProcessingObjectConfiguration_Impl, IAudioProcessingObjectRT,
     IAudioProcessingObjectRT_Impl, IAudioProcessingObject_Impl, IAudioSystemEffects,
-    IAudioSystemEffects2, IAudioSystemEffects2_Impl, IAudioSystemEffects_Impl,
-    APO_CONNECTION_DESCRIPTOR, APO_CONNECTION_PROPERTY, APO_REG_PROPERTIES,
+    IAudioSystemEffects2, IAudioSystemEffects2_Impl, IAudioSystemEffects3,
+    IAudioSystemEffects3_Impl, IAudioSystemEffects_Impl, APO_CONNECTION_DESCRIPTOR,
+    APO_CONNECTION_PROPERTY, APO_REG_PROPERTIES, AUDIO_SYSTEMEFFECT, AUDIO_SYSTEMEFFECT_STATE,
+    AUDIO_SYSTEMEFFECT_STATE_OFF, AUDIO_SYSTEMEFFECT_STATE_ON,
 };
-use windows_core::{implement, Ref, GUID, HRESULT};
+use windows_core::{implement, Ref, BOOL, GUID, HRESULT};
+
+use crate::apo::SystemEffectState;
 
 use crate::apo::ProcessInput;
 use crate::buffer::{BufferFlags, CONNECTION_PROPERTY_SIGNATURE};
@@ -54,7 +58,8 @@ use crate::realtime::RealtimeContext;
     IAudioProcessingObjectConfiguration,
     IAudioProcessingObjectRT,
     IAudioSystemEffects,
-    IAudioSystemEffects2
+    IAudioSystemEffects2,
+    IAudioSystemEffects3
 )]
 pub struct ApoInstanceCom {
     instance: Arc<dyn AnyApoInstance>,
@@ -472,6 +477,107 @@ impl IAudioSystemEffects2_Impl for ApoInstanceCom_Impl {
     }
 }
 
+impl IAudioSystemEffects3_Impl for ApoInstanceCom_Impl {
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
+    fn GetControllableSystemEffectsList(
+        &self,
+        effects: *mut *mut AUDIO_SYSTEMEFFECT,
+        numeffects: *mut u32,
+        _event: HANDLE,
+    ) -> windows_core::Result<()> {
+        if effects.is_null() || numeffects.is_null() {
+            return Err(windows_core::Error::new(
+                HRESULT::from(HResult::E_POINTER),
+                "GetControllableSystemEffectsList output pointers were null",
+            ));
+        }
+
+        let user_effects = self.instance.system_effects();
+        let count = user_effects.len();
+
+        if count == 0 {
+            // Safety: pointers were null-checked above.
+            unsafe {
+                *effects = core::ptr::null_mut();
+                *numeffects = 0;
+            }
+            return Ok(());
+        }
+
+        let total_bytes = count
+            .checked_mul(core::mem::size_of::<AUDIO_SYSTEMEFFECT>())
+            .ok_or_else(|| {
+                windows_core::Error::new(
+                    HRESULT::from(HResult::E_OUTOFMEMORY),
+                    "GetControllableSystemEffectsList size calculation overflowed",
+                )
+            })?;
+        // Safety: combase.dll CoTaskMemAlloc returns null on OOM.
+        let raw = unsafe { windows::Win32::System::Com::CoTaskMemAlloc(total_bytes) };
+        if raw.is_null() {
+            return Err(windows_core::Error::new(
+                HRESULT::from(HResult::E_OUTOFMEMORY),
+                "CoTaskMemAlloc returned null for GetControllableSystemEffectsList",
+            ));
+        }
+        let list = raw.cast::<AUDIO_SYSTEMEFFECT>();
+        // Safety: `list` points to `count` × size_of::<AUDIO_SYSTEMEFFECT>()
+        // bytes; iteration is bounded by `count`.
+        unsafe {
+            for (i, eff) in user_effects.iter().enumerate() {
+                core::ptr::write(
+                    list.add(i),
+                    AUDIO_SYSTEMEFFECT {
+                        id: eff.id.into(),
+                        canSetState: BOOL::from(eff.controllable),
+                        state: match eff.state {
+                            SystemEffectState::Off => AUDIO_SYSTEMEFFECT_STATE_OFF,
+                            SystemEffectState::On => AUDIO_SYSTEMEFFECT_STATE_ON,
+                        },
+                    },
+                );
+            }
+            *effects = list;
+            *numeffects = count as u32;
+        }
+        Ok(())
+    }
+
+    fn SetAudioSystemEffectState(
+        &self,
+        effectid: &GUID,
+        state: AUDIO_SYSTEMEFFECT_STATE,
+    ) -> windows_core::Result<()> {
+        // Reject IDs the APO never advertised — the audio engine
+        // is not supposed to drive us into states for unknown
+        // effects, and accepting them silently would hide a bug.
+        let requested = crate::clsid::Clsid::from(*effectid);
+        if !self
+            .instance
+            .system_effects()
+            .iter()
+            .any(|e| e.id == requested)
+        {
+            return Err(windows_core::Error::new(
+                HRESULT::from(HResult::E_INVALIDARG),
+                "SetAudioSystemEffectState: unknown effect id",
+            ));
+        }
+        let cross = match state {
+            AUDIO_SYSTEMEFFECT_STATE_OFF => SystemEffectState::Off,
+            AUDIO_SYSTEMEFFECT_STATE_ON => SystemEffectState::On,
+            other => {
+                return Err(windows_core::Error::new(
+                    HRESULT::from(HResult::E_INVALIDARG),
+                    alloc::format!("SetAudioSystemEffectState: unknown state value {}", other.0),
+                ));
+            }
+        };
+        self.instance.set_system_effect_state(&requested, cross);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -709,5 +815,146 @@ mod tests {
             assert_eq!(Clsid::from(b), FX_B);
             CoTaskMemFree(Some(list.cast()));
         }
+    }
+
+    /// IAudioSystemEffects3::GetControllableSystemEffectsList returns
+    /// the same effect list as v2's GetEffectsList but with
+    /// per-effect controllable / state fields populated from the
+    /// user APO's declaration.
+    #[test]
+    fn get_controllable_system_effects_list_reports_user_state() {
+        use crate::apo::{SystemEffect, SystemEffectState};
+        use crate::instance::ApoInstance;
+        use windows::Win32::Media::Audio::Apo::{
+            IAudioSystemEffects3, AUDIO_SYSTEMEFFECT, AUDIO_SYSTEMEFFECT_STATE_OFF,
+            AUDIO_SYSTEMEFFECT_STATE_ON,
+        };
+        use windows::Win32::System::Com::CoTaskMemFree;
+        use windows_core::ComObject;
+
+        const FX_A: Clsid = Clsid::from_u128(0xBBBBBBBB_CCCC_DDDD_EEEE_FFFFFFFFFFFF);
+        const FX_B: Clsid = Clsid::from_u128(0x22222222_3333_4444_5555_666666666666);
+
+        struct ControllableEffects;
+        impl ProcessingObject for ControllableEffects {
+            const CLSID: Clsid = Clsid::from_u128(0x34343434_5656_7878_9A9A_BCBCBCBCBCBC);
+            const NAME: &'static str = "controllable";
+            const COPYRIGHT: &'static str = "test";
+            const CATEGORY: ApoCategory = ApoCategory::Sfx;
+            fn new() -> Self {
+                Self
+            }
+            fn system_effects(&self) -> &[SystemEffect] {
+                const E: [SystemEffect; 2] = [
+                    SystemEffect::new(FX_A)
+                        .with_controllable(true)
+                        .with_state(SystemEffectState::On),
+                    SystemEffect::new(FX_B)
+                        .with_controllable(false)
+                        .with_state(SystemEffectState::Off),
+                ];
+                &E
+            }
+            fn process(
+                &mut self,
+                _rt: &RealtimeContext,
+                input: ProcessInput<'_>,
+                output: &mut [f32],
+            ) -> BufferFlags {
+                output.copy_from_slice(input.samples());
+                input.flags()
+            }
+        }
+
+        let api: IAudioSystemEffects3 =
+            ComObject::new(ApoInstanceCom::new(Arc::new(ApoInstance::<
+                ControllableEffects,
+            >::new())))
+            .into_interface();
+        let mut list: *mut AUDIO_SYSTEMEFFECT = core::ptr::null_mut();
+        let mut count: u32 = 0;
+        // Safety: live IAudioSystemEffects3 vtable.
+        unsafe {
+            api.GetControllableSystemEffectsList(&mut list, &mut count, None)
+                .expect("GetControllableSystemEffectsList failed");
+        }
+        assert_eq!(count, 2);
+        assert!(!list.is_null());
+        // Safety: list is a CoTaskMemAlloc'd buffer of `count`
+        // AUDIO_SYSTEMEFFECTs; read both entries, then release.
+        unsafe {
+            let a = *list;
+            let b = *list.add(1);
+            assert_eq!(Clsid::from(a.id), FX_A);
+            assert!(a.canSetState.as_bool());
+            assert_eq!(a.state, AUDIO_SYSTEMEFFECT_STATE_ON);
+            assert_eq!(Clsid::from(b.id), FX_B);
+            assert!(!b.canSetState.as_bool());
+            assert_eq!(b.state, AUDIO_SYSTEMEFFECT_STATE_OFF);
+            CoTaskMemFree(Some(list.cast()));
+        }
+    }
+
+    /// IAudioSystemEffects3::SetAudioSystemEffectState dispatches
+    /// into the user's `set_system_effect_state` override. Unknown
+    /// IDs yield E_INVALIDARG without touching user state.
+    #[test]
+    fn set_audio_system_effect_state_dispatches_and_rejects_unknown_ids() {
+        use crate::apo::{SystemEffect, SystemEffectState};
+        use crate::instance::ApoInstance;
+        use core::cell::Cell;
+        use windows::Win32::Media::Audio::Apo::{
+            IAudioSystemEffects3, AUDIO_SYSTEMEFFECT_STATE_OFF, AUDIO_SYSTEMEFFECT_STATE_ON,
+        };
+        use windows_core::{ComObject, GUID};
+
+        const FX: Clsid = Clsid::from_u128(0xABCDABCD_1234_5678_9ABC_DEF012345678);
+
+        struct Toggleable {
+            last: Cell<Option<(Clsid, SystemEffectState)>>,
+        }
+        impl ProcessingObject for Toggleable {
+            const CLSID: Clsid = Clsid::from_u128(0x55555555_6666_7777_8888_999999999999);
+            const NAME: &'static str = "toggleable";
+            const COPYRIGHT: &'static str = "test";
+            const CATEGORY: ApoCategory = ApoCategory::Sfx;
+            fn new() -> Self {
+                Self {
+                    last: Cell::new(None),
+                }
+            }
+            fn system_effects(&self) -> &[SystemEffect] {
+                const E: [SystemEffect; 1] = [SystemEffect::new(FX).with_controllable(true)];
+                &E
+            }
+            fn set_system_effect_state(&mut self, id: &Clsid, state: SystemEffectState) {
+                self.last.set(Some((*id, state)));
+            }
+            fn process(
+                &mut self,
+                _rt: &RealtimeContext,
+                input: ProcessInput<'_>,
+                output: &mut [f32],
+            ) -> BufferFlags {
+                output.copy_from_slice(input.samples());
+                input.flags()
+            }
+        }
+
+        let inst = Arc::new(ApoInstance::<Toggleable>::new());
+        let api: IAudioSystemEffects3 =
+            ComObject::new(ApoInstanceCom::new(inst.clone())).into_interface();
+
+        // Known effect → succeeds and forwards to the user.
+        let id: GUID = FX.into();
+        // Safety: live IAudioSystemEffects3 vtable.
+        unsafe { api.SetAudioSystemEffectState(id, AUDIO_SYSTEMEFFECT_STATE_OFF) }
+            .expect("SetAudioSystemEffectState(known, Off) failed");
+
+        // Unknown effect → E_INVALIDARG; user state untouched.
+        let unknown: GUID = Clsid::from_u128(0xDEAD_DEAD_DEAD_DEAD_DEAD_DEAD_DEAD_DEAD).into();
+        let err = unsafe { api.SetAudioSystemEffectState(unknown, AUDIO_SYSTEMEFFECT_STATE_ON) }
+            .expect_err("SetAudioSystemEffectState(unknown) should fail");
+        assert_eq!(err.code(), HRESULT::from(HResult::E_INVALIDARG));
     }
 }
