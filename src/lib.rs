@@ -33,6 +33,9 @@
 #![deny(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+pub mod apo;
+pub mod error;
+pub mod format;
 pub mod realtime;
 
 #[cfg(windows)]
@@ -41,3 +44,7 @@ pub mod raw;
 #[cfg(all(windows, feature = "aec"))]
 #[cfg_attr(docsrs, doc(cfg(all(windows, feature = "aec"))))]
 pub mod aec;
+
+pub use apo::ApoCategory;
+pub use error::HResult;
+pub use format::{Format, FormatNegotiation};
