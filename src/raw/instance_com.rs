@@ -33,18 +33,10 @@ use windows::Win32::Media::Audio::Apo::{
     IAudioSystemEffects2, IAudioSystemEffects2_Impl, IAudioSystemEffects3,
     IAudioSystemEffects3_Impl, IAudioSystemEffects_Impl, APO_CONNECTION_DESCRIPTOR,
     APO_CONNECTION_PROPERTY, APO_REG_PROPERTIES, AUDIO_SYSTEMEFFECT, AUDIO_SYSTEMEFFECT_STATE,
-    AUDIO_SYSTEMEFFECT_STATE_OFF, AUDIO_SYSTEMEFFECT_STATE_ON,
 };
-use windows_core::{implement, Ref, BOOL, GUID, HRESULT};
+use windows_core::{implement, Ref, GUID};
 
-use crate::apo::SystemEffectState;
-
-use crate::apo::ProcessInput;
-use crate::buffer::{BufferFlags, CONNECTION_PROPERTY_SIGNATURE};
-use crate::error::HResult;
-use crate::format::Format;
 use crate::instance::AnyApoInstance;
-use crate::realtime::RealtimeContext;
 
 /// COM-side carrier for an [`Arc<dyn AnyApoInstance>`](AnyApoInstance).
 ///
@@ -95,6 +87,9 @@ impl Drop for ApoInstanceCom {
     }
 }
 
+// Method bodies for these traits live in `crate::raw::dispatch`
+// so the AEC carrier can share the implementations; this block is
+// therefore a thin set of one-line delegates.
 impl IAudioProcessingObject_Impl for ApoInstanceCom_Impl {
     fn Reset(&self) -> windows_core::Result<()> {
         // The framework has no behavioural reset hook on the
@@ -102,127 +97,43 @@ impl IAudioProcessingObject_Impl for ApoInstanceCom_Impl {
         // override unlock_for_process. Treat Reset as a no-op.
         Ok(())
     }
-
     fn GetLatency(&self) -> windows_core::Result<i64> {
         // The trait does not yet expose latency; report zero
         // (matching the SYSVAD passthrough sample) until a
         // ProcessingObject::latency_hns method lands.
         Ok(0)
     }
-
     fn GetRegistrationProperties(&self) -> windows_core::Result<*mut APO_REG_PROPERTIES> {
-        // The audio engine takes ownership of the returned buffer
-        // and releases it with CoTaskMemFree. The builder allocates
-        // with the matching CoTaskMemAlloc.
-        crate::raw::reg_properties::build_registration_properties(self.instance.as_ref())
+        crate::raw::dispatch::get_registration_properties_siso(self.instance.as_ref())
     }
-
     fn Initialize(&self, _cbdatasize: u32, _pbydata: *const u8) -> windows_core::Result<()> {
-        // The framework's `AnyApoInstance::initialize` does not
-        // currently consume user-supplied initialisation blobs;
-        // delegate straight through.
-        self.instance.initialize().map_err(|e| {
-            windows_core::Error::new(HRESULT::from(e), "ProcessingObject::initialize failed")
-        })
+        crate::raw::dispatch::initialize(self.instance.as_ref())
     }
-
     fn IsInputFormatSupported(
         &self,
         _poppositeformat: Ref<IAudioMediaType>,
         prequestedinputformat: Ref<IAudioMediaType>,
     ) -> windows_core::Result<IAudioMediaType> {
-        // The framework currently ignores `poppositeformat` —
-        // negotiation only consults the requested input format
-        // and trusts the user's `ProcessingObject::is_input_format_supported`
-        // for the verdict. A future revision can refine the
-        // contract by surfacing the opposite format to the user.
-        crate::raw::media_type::negotiate_format(
+        crate::raw::dispatch::negotiate_format(
             self.instance.as_ref(),
             prequestedinputformat,
             crate::raw::media_type::NegotiationDirection::Input,
         )
     }
-
     fn IsOutputFormatSupported(
         &self,
         _poppositeformat: Ref<IAudioMediaType>,
         prequestedoutputformat: Ref<IAudioMediaType>,
     ) -> windows_core::Result<IAudioMediaType> {
-        crate::raw::media_type::negotiate_format(
+        crate::raw::dispatch::negotiate_format(
             self.instance.as_ref(),
             prequestedoutputformat,
             crate::raw::media_type::NegotiationDirection::Output,
         )
     }
-
     fn GetInputChannelCount(&self) -> windows_core::Result<u32> {
-        // The audio engine queries this after LockForProcess.
-        // Read the channel count out of the cached negotiated
-        // input format; the cache is populated whenever the cell
-        // is in `State::Locked` and cleared on `UnlockForProcess`.
-        self.instance
-            .locked_formats()
-            .map(|f| u32::from(f.input.channels()))
-            .ok_or_else(|| {
-                windows_core::Error::new(
-                    HRESULT::from(HResult::APOERR_NOT_LOCKED),
-                    "GetInputChannelCount called outside of the Locked state",
-                )
-            })
+        crate::raw::dispatch::get_input_channel_count(self.instance.as_ref())
     }
-}
-
-/// Extract a [`Format`] from a host-supplied
-/// [`APO_CONNECTION_DESCRIPTOR`].
-///
-/// # Safety
-///
-/// `descriptor` must point to a `APO_CONNECTION_DESCRIPTOR` whose
-/// `pFormat` is a valid `IAudioMediaType` (the audio engine
-/// guarantees this in `LockForProcess`). The returned `Format`
-/// holds a deep copy of the fields; no references survive the
-/// call.
-unsafe fn format_from_descriptor(
-    descriptor: *const APO_CONNECTION_DESCRIPTOR,
-) -> windows_core::Result<Format> {
-    if descriptor.is_null() {
-        return Err(windows_core::Error::new(
-            HRESULT::from(HResult::E_POINTER),
-            "APO_CONNECTION_DESCRIPTOR pointer was null",
-        ));
-    }
-    // Safety: caller guarantees the pointer is valid and the
-    // signature stamp is set by the audio engine.
-    let descriptor = unsafe { &*descriptor };
-    if descriptor.u32Signature != CONNECTION_PROPERTY_SIGNATURE {
-        return Err(windows_core::Error::new(
-            HRESULT::from(HResult::APOERR_INVALID_INPUT_DATA),
-            "APO_CONNECTION_DESCRIPTOR.u32Signature did not match 'APOC'",
-        ));
-    }
-    let Some(media_type) = descriptor.pFormat.as_ref() else {
-        return Err(windows_core::Error::new(
-            HRESULT::from(HResult::APOERR_FORMAT_NOT_SUPPORTED),
-            "APO_CONNECTION_DESCRIPTOR.pFormat was None",
-        ));
-    };
-    // Safety: media_type is a valid IAudioMediaType handed to us
-    // by the audio engine. GetAudioFormat returns an interior
-    // pointer the engine owns; we copy fields out via
-    // Format::from_waveformatex.
-    let wf_ptr = unsafe { media_type.GetAudioFormat() };
-    if wf_ptr.is_null() {
-        return Err(windows_core::Error::new(
-            HRESULT::from(HResult::APOERR_FORMAT_NOT_SUPPORTED),
-            "IAudioMediaType::GetAudioFormat returned null",
-        ));
-    }
-    // Safety: GetAudioFormat returns a pointer to a WAVEFORMATEX
-    // owned by the audio engine for the duration of the
-    // LockForProcess call. `from_waveformatex_ptr` examines the
-    // `cbSize` / `wFormatTag` markers to pick WAVEFORMATEX vs
-    // WAVEFORMATEXTENSIBLE and copies the fields out.
-    Ok(unsafe { Format::from_waveformatex_ptr(wf_ptr) })
 }
 
 impl IAudioProcessingObjectConfiguration_Impl for ApoInstanceCom_Impl {
@@ -234,50 +145,21 @@ impl IAudioProcessingObjectConfiguration_Impl for ApoInstanceCom_Impl {
         u32numoutputconnections: u32,
         ppoutputconnections: *const *const APO_CONNECTION_DESCRIPTOR,
     ) -> windows_core::Result<()> {
-        // The framework currently supports SISO APOs only — one
-        // input connection, one output connection — matching the
-        // architecture-doc constraint.
-        if u32numinputconnections != 1 || u32numoutputconnections != 1 {
-            return Err(windows_core::Error::new(
-                HRESULT::from(HResult::APOERR_NUM_CONNECTIONS_INVALID),
-                "framework supports exactly one input and one output connection",
-            ));
-        }
-        if ppinputconnections.is_null() || ppoutputconnections.is_null() {
-            return Err(windows_core::Error::new(
-                HRESULT::from(HResult::E_POINTER),
-                "connection-descriptor array pointer was null",
-            ));
-        }
-        // Safety: the audio engine guarantees the arrays hold the
-        // declared number of valid `APO_CONNECTION_DESCRIPTOR*`
-        // entries, and the count of 1 was checked above.
-        let input_desc = unsafe { *ppinputconnections };
-        let output_desc = unsafe { *ppoutputconnections };
-
-        // Safety: extracted descriptors are valid per the engine's
-        // contract; format_from_descriptor performs its own null /
-        // signature checks.
-        let input_format = unsafe { format_from_descriptor(input_desc) }?;
-        let output_format = unsafe { format_from_descriptor(output_desc) }?;
-
-        self.instance
-            .lock_for_process(&input_format, &output_format)
-            .map_err(|e| {
-                windows_core::Error::new(
-                    HRESULT::from(e),
-                    "ProcessingObject::lock_for_process failed",
-                )
-            })
-    }
-
-    fn UnlockForProcess(&self) -> windows_core::Result<()> {
-        self.instance.unlock_for_process().map_err(|e| {
-            windows_core::Error::new(
-                HRESULT::from(e),
-                "ProcessingObject::unlock_for_process failed",
+        // Safety: pointers obey the LockForProcess ABI per the
+        // audio engine's contract; the helper validates count == 1
+        // and non-null before dereferencing.
+        unsafe {
+            crate::raw::dispatch::lock_for_process(
+                self.instance.as_ref(),
+                u32numinputconnections,
+                ppinputconnections,
+                u32numoutputconnections,
+                ppoutputconnections,
             )
-        })
+        }
+    }
+    fn UnlockForProcess(&self) -> windows_core::Result<()> {
+        crate::raw::dispatch::unlock_for_process(self.instance.as_ref())
     }
 }
 
@@ -290,113 +172,24 @@ impl IAudioProcessingObjectRT_Impl for ApoInstanceCom_Impl {
         u32numoutputconnections: u32,
         ppoutputconnections: *mut *mut APO_CONNECTION_PROPERTY,
     ) {
-        // Defensive: write SILENT output and bail without
-        // panicking if any precondition fails. APOProcess returns
-        // no HRESULT — there is nowhere to report errors — so the
-        // sole graceful degradation is to emit silence.
-        let mark_output_silent = |frame_count: u32| {
-            if u32numoutputconnections == 1 && !ppoutputconnections.is_null() {
-                // Safety: count is 1 and pointer is non-null.
-                let out_ptr = unsafe { *ppoutputconnections };
-                if !out_ptr.is_null() {
-                    // Safety: COM caller's APO_CONNECTION_PROPERTY*
-                    // points to a writable slot.
-                    unsafe {
-                        (*out_ptr).u32ValidFrameCount = frame_count;
-                        (*out_ptr).u32BufferFlags =
-                            windows::Win32::Media::Audio::Apo::BUFFER_SILENT;
-                    }
-                }
-            }
-        };
-
-        if u32numinputconnections != 1 || u32numoutputconnections != 1 {
-            mark_output_silent(0);
-            return;
+        // Safety: pointers obey the APOProcess ABI per the audio
+        // engine's contract; the helper validates everything
+        // before dereferencing and bails to BUFFER_SILENT on any
+        // failure.
+        unsafe {
+            crate::raw::dispatch::apo_process(
+                self.instance.as_ref(),
+                u32numinputconnections,
+                ppinputconnections,
+                u32numoutputconnections,
+                ppoutputconnections,
+            );
         }
-        if ppinputconnections.is_null() || ppoutputconnections.is_null() {
-            mark_output_silent(0);
-            return;
-        }
-
-        // Safety: count == 1 and pointers are non-null per the
-        // checks above. The audio engine guarantees each entry
-        // points to a valid APO_CONNECTION_PROPERTY.
-        let in_ptr = unsafe { *ppinputconnections };
-        let out_ptr = unsafe { *ppoutputconnections };
-        if in_ptr.is_null() || out_ptr.is_null() {
-            mark_output_silent(0);
-            return;
-        }
-        // Safety: same.
-        let in_prop = unsafe { &*in_ptr };
-        let out_prop = unsafe { &mut *out_ptr };
-
-        if in_prop.u32Signature != CONNECTION_PROPERTY_SIGNATURE
-            || out_prop.u32Signature != CONNECTION_PROPERTY_SIGNATURE
-        {
-            mark_output_silent(0);
-            return;
-        }
-
-        let Some(formats) = self.instance.locked_formats() else {
-            mark_output_silent(0);
-            return;
-        };
-        let channels = formats.input.channels() as usize;
-        if channels == 0 || !formats.input.is_float() || formats.input.bits_per_sample() != 32 {
-            // The framework's default ProcessingObject negotiation
-            // only ever accepts pcm_float32; refuse anything else.
-            mark_output_silent(0);
-            return;
-        }
-        let frames = in_prop.u32ValidFrameCount as usize;
-        let sample_count = match frames.checked_mul(channels) {
-            Some(n) => n,
-            None => {
-                mark_output_silent(0);
-                return;
-            }
-        };
-
-        // Safety: the host guarantees the buffers hold at least
-        // u32ValidFrameCount × channels float32 samples. We cap
-        // by `frames` (which the host validated) and treat the
-        // slices as Rust references for the duration of the
-        // dispatch.
-        let input_slice =
-            unsafe { core::slice::from_raw_parts(in_prop.pBuffer as *const f32, sample_count) };
-        let output_slice =
-            unsafe { core::slice::from_raw_parts_mut(out_prop.pBuffer as *mut f32, sample_count) };
-
-        let in_flags: BufferFlags = in_prop.u32BufferFlags.into();
-        // Safety: we are on the audio engine's realtime thread —
-        // APOProcess only runs after LockForProcess set state to
-        // Locked, and the framework gates allocator use through
-        // the `RealtimeContext` parameter.
-        let rt = unsafe { RealtimeContext::new_unchecked() };
-
-        let out_flags =
-            match self
-                .instance
-                .process(&rt, ProcessInput::new(input_slice, in_flags), output_slice)
-            {
-                Ok(f) => f,
-                Err(_) => {
-                    mark_output_silent(in_prop.u32ValidFrameCount);
-                    return;
-                }
-            };
-
-        out_prop.u32ValidFrameCount = in_prop.u32ValidFrameCount;
-        out_prop.u32BufferFlags = out_flags.into();
     }
-
     fn CalcInputFrames(&self, u32outputframecount: u32) -> u32 {
         // No resampling: one input frame yields one output frame.
         u32outputframecount
     }
-
     fn CalcOutputFrames(&self, u32inputframecount: u32) -> u32 {
         // No resampling: one input frame yields one output frame.
         u32inputframecount
@@ -415,66 +208,14 @@ impl IAudioSystemEffects2_Impl for ApoInstanceCom_Impl {
         &self,
         ppeffectsids: *mut *mut GUID,
         pceffects: *mut u32,
-        _event: HANDLE,
+        event: HANDLE,
     ) -> windows_core::Result<()> {
-        // The Windows audio engine takes ownership of `*ppeffectsids`
-        // (a `CoTaskMemAlloc`-backed buffer of GUIDs); the `event`
-        // handle is one the APO can `SetEvent` on to indicate the
-        // effect list has changed. The framework's current
-        // `system_effects` snapshot is static between
-        // `LockForProcess` cycles, so we ignore the event.
-        if ppeffectsids.is_null() || pceffects.is_null() {
-            return Err(windows_core::Error::new(
-                HRESULT::from(HResult::E_POINTER),
-                "GetEffectsList output pointers were null",
-            ));
-        }
-
-        let effects = self.instance.system_effects();
-        let count = effects.len();
-
-        // Zero-effect case: write null pointer + zero count, return
-        // S_OK. The audio engine treats this as "the APO has no
-        // controllable effects".
-        if count == 0 {
-            // Safety: pointers were null-checked above.
-            unsafe {
-                *ppeffectsids = core::ptr::null_mut();
-                *pceffects = 0;
-            }
-            return Ok(());
-        }
-
-        // Allocate one GUID per effect via CoTaskMemAlloc so the
-        // audio engine can release it with CoTaskMemFree.
-        let total_bytes = count
-            .checked_mul(core::mem::size_of::<GUID>())
-            .ok_or_else(|| {
-                windows_core::Error::new(
-                    HRESULT::from(HResult::E_OUTOFMEMORY),
-                    "GetEffectsList size calculation overflowed",
-                )
-            })?;
-        // Safety: combase.dll CoTaskMemAlloc returns null on OOM.
-        let raw = unsafe { windows::Win32::System::Com::CoTaskMemAlloc(total_bytes) };
-        if raw.is_null() {
-            return Err(windows_core::Error::new(
-                HRESULT::from(HResult::E_OUTOFMEMORY),
-                "CoTaskMemAlloc returned null for GetEffectsList",
-            ));
-        }
-        let list = raw.cast::<GUID>();
-        // Safety: `list` points to `count` × size_of::<GUID>() bytes
-        // of writable memory we just allocated; iteration is bounded
-        // by `count`.
-        unsafe {
-            for (i, effect) in effects.iter().enumerate() {
-                core::ptr::write(list.add(i), effect.id.into());
-            }
-            *ppeffectsids = list;
-            *pceffects = count as u32;
-        }
-        Ok(())
+        crate::raw::dispatch::get_effects_list(
+            self.instance.as_ref(),
+            ppeffectsids,
+            pceffects,
+            event,
+        )
     }
 }
 
@@ -484,98 +225,21 @@ impl IAudioSystemEffects3_Impl for ApoInstanceCom_Impl {
         &self,
         effects: *mut *mut AUDIO_SYSTEMEFFECT,
         numeffects: *mut u32,
-        _event: HANDLE,
+        event: HANDLE,
     ) -> windows_core::Result<()> {
-        if effects.is_null() || numeffects.is_null() {
-            return Err(windows_core::Error::new(
-                HRESULT::from(HResult::E_POINTER),
-                "GetControllableSystemEffectsList output pointers were null",
-            ));
-        }
-
-        let user_effects = self.instance.system_effects();
-        let count = user_effects.len();
-
-        if count == 0 {
-            // Safety: pointers were null-checked above.
-            unsafe {
-                *effects = core::ptr::null_mut();
-                *numeffects = 0;
-            }
-            return Ok(());
-        }
-
-        let total_bytes = count
-            .checked_mul(core::mem::size_of::<AUDIO_SYSTEMEFFECT>())
-            .ok_or_else(|| {
-                windows_core::Error::new(
-                    HRESULT::from(HResult::E_OUTOFMEMORY),
-                    "GetControllableSystemEffectsList size calculation overflowed",
-                )
-            })?;
-        // Safety: combase.dll CoTaskMemAlloc returns null on OOM.
-        let raw = unsafe { windows::Win32::System::Com::CoTaskMemAlloc(total_bytes) };
-        if raw.is_null() {
-            return Err(windows_core::Error::new(
-                HRESULT::from(HResult::E_OUTOFMEMORY),
-                "CoTaskMemAlloc returned null for GetControllableSystemEffectsList",
-            ));
-        }
-        let list = raw.cast::<AUDIO_SYSTEMEFFECT>();
-        // Safety: `list` points to `count` × size_of::<AUDIO_SYSTEMEFFECT>()
-        // bytes; iteration is bounded by `count`.
-        unsafe {
-            for (i, eff) in user_effects.iter().enumerate() {
-                core::ptr::write(
-                    list.add(i),
-                    AUDIO_SYSTEMEFFECT {
-                        id: eff.id.into(),
-                        canSetState: BOOL::from(eff.controllable),
-                        state: match eff.state {
-                            SystemEffectState::Off => AUDIO_SYSTEMEFFECT_STATE_OFF,
-                            SystemEffectState::On => AUDIO_SYSTEMEFFECT_STATE_ON,
-                        },
-                    },
-                );
-            }
-            *effects = list;
-            *numeffects = count as u32;
-        }
-        Ok(())
+        crate::raw::dispatch::get_controllable_system_effects_list(
+            self.instance.as_ref(),
+            effects,
+            numeffects,
+            event,
+        )
     }
-
     fn SetAudioSystemEffectState(
         &self,
         effectid: &GUID,
         state: AUDIO_SYSTEMEFFECT_STATE,
     ) -> windows_core::Result<()> {
-        // Reject IDs the APO never advertised — the audio engine
-        // is not supposed to drive us into states for unknown
-        // effects, and accepting them silently would hide a bug.
-        let requested = crate::clsid::Clsid::from(*effectid);
-        if !self
-            .instance
-            .system_effects()
-            .iter()
-            .any(|e| e.id == requested)
-        {
-            return Err(windows_core::Error::new(
-                HRESULT::from(HResult::E_INVALIDARG),
-                "SetAudioSystemEffectState: unknown effect id",
-            ));
-        }
-        let cross = match state {
-            AUDIO_SYSTEMEFFECT_STATE_OFF => SystemEffectState::Off,
-            AUDIO_SYSTEMEFFECT_STATE_ON => SystemEffectState::On,
-            other => {
-                return Err(windows_core::Error::new(
-                    HRESULT::from(HResult::E_INVALIDARG),
-                    alloc::format!("SetAudioSystemEffectState: unknown state value {}", other.0),
-                ));
-            }
-        };
-        self.instance.set_system_effect_state(&requested, cross);
-        Ok(())
+        crate::raw::dispatch::set_audio_system_effect_state(self.instance.as_ref(), effectid, state)
     }
 }
 
@@ -585,8 +249,10 @@ mod tests {
     use crate::apo::{ApoCategory, ProcessInput, ProcessingObject};
     use crate::buffer::BufferFlags;
     use crate::clsid::Clsid;
+    use crate::error::HResult;
     use crate::instance::ApoInstance;
     use crate::realtime::{RealtimeContext, State};
+    use windows_core::HRESULT;
 
     struct Dummy;
     impl ProcessingObject for Dummy {
