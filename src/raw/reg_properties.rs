@@ -23,7 +23,7 @@ use core::ptr;
 
 use windows::Win32::Media::Audio::Apo::{
     IAudioProcessingObject, IAudioProcessingObjectConfiguration, IAudioProcessingObjectRT,
-    APO_FLAG_NONE, APO_REG_PROPERTIES,
+    IAudioSystemEffects, IAudioSystemEffects2, APO_FLAG_NONE, APO_REG_PROPERTIES,
 };
 use windows::Win32::System::Com::CoTaskMemAlloc;
 use windows_core::{Interface, GUID, HRESULT};
@@ -37,11 +37,13 @@ use crate::instance::AnyApoInstance;
 /// [`crate::raw::instance_com::ApoInstanceCom`]. The audio engine
 /// does not require a specific ordering, but keeping the two in
 /// sync avoids surprises.
-fn supported_interfaces() -> [GUID; 3] {
+fn supported_interfaces() -> [GUID; 5] {
     [
         IAudioProcessingObject::IID,
         IAudioProcessingObjectConfiguration::IID,
         IAudioProcessingObjectRT::IID,
+        IAudioSystemEffects::IID,
+        IAudioSystemEffects2::IID,
     ]
 }
 
@@ -246,7 +248,7 @@ mod tests {
             assert_eq!((*props).u32MinOutputConnections, 1);
             assert_eq!((*props).u32MaxOutputConnections, 1);
             assert_eq!((*props).u32MaxInstances, 0);
-            assert_eq!((*props).u32NumAPOInterfaces, 3);
+            assert_eq!((*props).u32NumAPOInterfaces, 5);
             drop_properties(props);
         }
     }
@@ -276,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn build_registration_properties_writes_three_interface_ids() {
+    fn build_registration_properties_writes_advertised_interface_ids() {
         let inst = make_instance();
         let props = build_registration_properties(inst.as_ref()).unwrap();
         // Safety: live pointer. The IID list starts at
@@ -287,6 +289,8 @@ mod tests {
             assert_eq!(*head, IAudioProcessingObject::IID);
             assert_eq!(*head.add(1), IAudioProcessingObjectConfiguration::IID);
             assert_eq!(*head.add(2), IAudioProcessingObjectRT::IID);
+            assert_eq!(*head.add(3), IAudioSystemEffects::IID);
+            assert_eq!(*head.add(4), IAudioSystemEffects2::IID);
             drop_properties(props);
         }
     }

@@ -25,13 +25,15 @@ extern crate alloc;
 
 use alloc::sync::Arc;
 
+use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Media::Audio::Apo::{
     IAudioMediaType, IAudioProcessingObject, IAudioProcessingObjectConfiguration,
     IAudioProcessingObjectConfiguration_Impl, IAudioProcessingObjectRT,
-    IAudioProcessingObjectRT_Impl, IAudioProcessingObject_Impl, APO_CONNECTION_DESCRIPTOR,
-    APO_CONNECTION_PROPERTY, APO_REG_PROPERTIES,
+    IAudioProcessingObjectRT_Impl, IAudioProcessingObject_Impl, IAudioSystemEffects,
+    IAudioSystemEffects2, IAudioSystemEffects2_Impl, IAudioSystemEffects_Impl,
+    APO_CONNECTION_DESCRIPTOR, APO_CONNECTION_PROPERTY, APO_REG_PROPERTIES,
 };
-use windows_core::{implement, Ref, HRESULT};
+use windows_core::{implement, Ref, GUID, HRESULT};
 
 use crate::apo::ProcessInput;
 use crate::buffer::{BufferFlags, CONNECTION_PROPERTY_SIGNATURE};
@@ -50,7 +52,9 @@ use crate::realtime::RealtimeContext;
 #[implement(
     IAudioProcessingObject,
     IAudioProcessingObjectConfiguration,
-    IAudioProcessingObjectRT
+    IAudioProcessingObjectRT,
+    IAudioSystemEffects,
+    IAudioSystemEffects2
 )]
 pub struct ApoInstanceCom {
     instance: Arc<dyn AnyApoInstance>,
@@ -393,6 +397,81 @@ impl IAudioProcessingObjectRT_Impl for ApoInstanceCom_Impl {
     }
 }
 
+// IAudioSystemEffects (v1) is an empty marker interface. Listing it
+// on the `#[implement(...)]` annotation makes `QueryInterface` for
+// `IID_IAudioSystemEffects` resolve through the COM bridge; the
+// trait carries no methods of its own.
+impl IAudioSystemEffects_Impl for ApoInstanceCom_Impl {}
+
+impl IAudioSystemEffects2_Impl for ApoInstanceCom_Impl {
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
+    fn GetEffectsList(
+        &self,
+        ppeffectsids: *mut *mut GUID,
+        pceffects: *mut u32,
+        _event: HANDLE,
+    ) -> windows_core::Result<()> {
+        // The Windows audio engine takes ownership of `*ppeffectsids`
+        // (a `CoTaskMemAlloc`-backed buffer of GUIDs); the `event`
+        // handle is one the APO can `SetEvent` on to indicate the
+        // effect list has changed. The framework's current
+        // `system_effects` snapshot is static between
+        // `LockForProcess` cycles, so we ignore the event.
+        if ppeffectsids.is_null() || pceffects.is_null() {
+            return Err(windows_core::Error::new(
+                HRESULT::from(HResult::E_POINTER),
+                "GetEffectsList output pointers were null",
+            ));
+        }
+
+        let effects = self.instance.system_effects();
+        let count = effects.len();
+
+        // Zero-effect case: write null pointer + zero count, return
+        // S_OK. The audio engine treats this as "the APO has no
+        // controllable effects".
+        if count == 0 {
+            // Safety: pointers were null-checked above.
+            unsafe {
+                *ppeffectsids = core::ptr::null_mut();
+                *pceffects = 0;
+            }
+            return Ok(());
+        }
+
+        // Allocate one GUID per effect via CoTaskMemAlloc so the
+        // audio engine can release it with CoTaskMemFree.
+        let total_bytes = count
+            .checked_mul(core::mem::size_of::<GUID>())
+            .ok_or_else(|| {
+                windows_core::Error::new(
+                    HRESULT::from(HResult::E_OUTOFMEMORY),
+                    "GetEffectsList size calculation overflowed",
+                )
+            })?;
+        // Safety: combase.dll CoTaskMemAlloc returns null on OOM.
+        let raw = unsafe { windows::Win32::System::Com::CoTaskMemAlloc(total_bytes) };
+        if raw.is_null() {
+            return Err(windows_core::Error::new(
+                HRESULT::from(HResult::E_OUTOFMEMORY),
+                "CoTaskMemAlloc returned null for GetEffectsList",
+            ));
+        }
+        let list = raw.cast::<GUID>();
+        // Safety: `list` points to `count` × size_of::<GUID>() bytes
+        // of writable memory we just allocated; iteration is bounded
+        // by `count`.
+        unsafe {
+            for (i, effect) in effects.iter().enumerate() {
+                core::ptr::write(list.add(i), effect.id.into());
+            }
+            *ppeffectsids = list;
+            *pceffects = count as u32;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -543,6 +622,92 @@ mod tests {
                 <Dummy as ProcessingObject>::CLSID
             );
             CoTaskMemFree(Some(props.cast()));
+        }
+    }
+
+    /// A `ProcessingObject` whose `Dummy` default produces an empty
+    /// system-effect list. `GetEffectsList` should write a null
+    /// pointer + zero count and return S_OK.
+    #[test]
+    fn get_effects_list_reports_no_effects_for_default_dummy() {
+        use windows::Win32::Media::Audio::Apo::IAudioSystemEffects2;
+        use windows_core::{ComObject, GUID};
+
+        let api: IAudioSystemEffects2 = ComObject::new(new_com()).into_interface();
+        let mut list: *mut GUID = 0xDEAD_BEEF as *mut GUID;
+        let mut count: u32 = 0xDEAD_BEEF;
+        // Safety: live IAudioSystemEffects2 vtable; the event
+        // handle is a null `HANDLE` because the framework's
+        // current implementation ignores it.
+        unsafe {
+            api.GetEffectsList(&mut list, &mut count, Default::default())
+                .expect("GetEffectsList failed");
+        }
+        assert!(list.is_null(), "empty list expected; got {list:p}");
+        assert_eq!(count, 0);
+        // No CoTaskMemFree needed when the list is null. Dropping
+        // the IAudioSystemEffects2 here releases the underlying
+        // ApoInstanceCom via the COM refcount.
+        drop(api);
+    }
+
+    /// A `ProcessingObject` with two advertised system effects.
+    /// `GetEffectsList` should hand back a CoTaskMemAlloc'd GUID
+    /// list of length 2 whose entries match the user's declaration.
+    #[test]
+    fn get_effects_list_reports_advertised_effects() {
+        use crate::apo::SystemEffect;
+        use crate::instance::ApoInstance;
+        use windows::Win32::Media::Audio::Apo::IAudioSystemEffects2;
+        use windows::Win32::System::Com::CoTaskMemFree;
+        use windows_core::{ComObject, GUID};
+
+        const FX_A: Clsid = Clsid::from_u128(0xAAAAAAAA_BBBB_CCCC_DDDD_EEEEEEEEEEEE);
+        const FX_B: Clsid = Clsid::from_u128(0x11111111_2222_3333_4444_555555555555);
+
+        struct TwoEffects;
+        impl ProcessingObject for TwoEffects {
+            const CLSID: Clsid = Clsid::from_u128(0x12121212_3434_5656_7878_9A9A9A9A9A9A);
+            const NAME: &'static str = "two-effects";
+            const COPYRIGHT: &'static str = "test";
+            const CATEGORY: ApoCategory = ApoCategory::Sfx;
+            fn new() -> Self {
+                Self
+            }
+            fn system_effects(&self) -> &[SystemEffect] {
+                const E: [SystemEffect; 2] = [SystemEffect::new(FX_A), SystemEffect::new(FX_B)];
+                &E
+            }
+            fn process(
+                &mut self,
+                _rt: &RealtimeContext,
+                input: ProcessInput<'_>,
+                output: &mut [f32],
+            ) -> BufferFlags {
+                output.copy_from_slice(input.samples());
+                input.flags()
+            }
+        }
+
+        let com = ApoInstanceCom::new(Arc::new(ApoInstance::<TwoEffects>::new()));
+        let api: IAudioSystemEffects2 = ComObject::new(com).into_interface();
+        let mut list: *mut GUID = core::ptr::null_mut();
+        let mut count: u32 = 0;
+        // Safety: live IAudioSystemEffects2 vtable.
+        unsafe {
+            api.GetEffectsList(&mut list, &mut count, Default::default())
+                .expect("GetEffectsList failed");
+        }
+        assert_eq!(count, 2);
+        assert!(!list.is_null());
+        // Safety: list is a CoTaskMemAlloc'd buffer of `count`
+        // GUIDs we just received; read both entries, then release.
+        unsafe {
+            let a = *list;
+            let b = *list.add(1);
+            assert_eq!(Clsid::from(a), FX_A);
+            assert_eq!(Clsid::from(b), FX_B);
+            CoTaskMemFree(Some(list.cast()));
         }
     }
 }

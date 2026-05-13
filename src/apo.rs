@@ -59,6 +59,35 @@ impl<'a> ProcessInput<'a> {
     }
 }
 
+/// One system effect this APO advertises to the audio engine via
+/// `IAudioSystemEffects2::GetEffectsList`.
+///
+/// The Windows audio engine surfaces these in the Sound Settings
+/// UI; users can see the effect by name (resolved via the
+/// per-effect ID in the audio property store) and — for APOs that
+/// implement `IAudioSystemEffects3` — toggle each independently.
+///
+/// The framework's default `ProcessingObject::system_effects`
+/// returns an empty slice, so an APO advertises no enumerable
+/// effects unless it overrides the method. That matches the
+/// historical behaviour of a v1-only `IAudioSystemEffects` marker.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub struct SystemEffect {
+    /// Unique identifier for this effect within the APO. The audio
+    /// engine pairs this with the friendly name in the per-endpoint
+    /// `AudioSystemEffects_PropertyStore` to render the UI.
+    pub id: Clsid,
+}
+
+impl SystemEffect {
+    /// Construct an effect descriptor from its unique ID.
+    #[inline]
+    #[must_use]
+    pub const fn new(id: Clsid) -> Self {
+        Self { id }
+    }
+}
+
 /// Category of an Audio Processing Object, as exposed via
 /// `IAudioSystemEffects` / `IAudioSystemEffects3`.
 ///
@@ -155,6 +184,21 @@ pub trait ProcessingObject: Sized + Send {
     /// [`Self::is_input_format_supported`].
     fn is_output_format_supported(&self, format: &Format) -> FormatNegotiation {
         default_float32_negotiation(format)
+    }
+
+    /// List of system effects this APO advertises to the audio
+    /// engine via `IAudioSystemEffects2::GetEffectsList`.
+    ///
+    /// The default returns an empty slice — the APO is registered
+    /// but exposes no granular effects in the Sound Settings UI.
+    /// Implementors that want per-effect toggles should override
+    /// this with a slice borrowed from `&self`.
+    ///
+    /// Called from non-realtime threads; allocation is permitted
+    /// in implementations that need it (though the default's
+    /// constant slice is allocation-free).
+    fn system_effects(&self) -> &[SystemEffect] {
+        &[]
     }
 
     /// Prepare for processing under the supplied input/output
