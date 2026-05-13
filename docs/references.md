@@ -1,5 +1,7 @@
 # References
 
+*Read this in other languages: [日本語](ja/references.md).*
+
 Reference material consulted during design.
 
 ## Microsoft documentation
