@@ -26,11 +26,15 @@ extern crate alloc;
 use alloc::sync::Arc;
 
 use windows::Win32::Media::Audio::Apo::{
-    IAudioMediaType, IAudioProcessingObject, IAudioProcessingObject_Impl, APO_REG_PROPERTIES,
+    IAudioMediaType, IAudioProcessingObject, IAudioProcessingObjectConfiguration,
+    IAudioProcessingObjectConfiguration_Impl, IAudioProcessingObject_Impl,
+    APO_CONNECTION_DESCRIPTOR, APO_REG_PROPERTIES,
 };
 use windows_core::{implement, Ref, HRESULT};
 
+use crate::buffer::CONNECTION_PROPERTY_SIGNATURE;
 use crate::error::HResult;
+use crate::format::Format;
 use crate::instance::AnyApoInstance;
 
 /// COM-side carrier for an [`Arc<dyn AnyApoInstance>`](AnyApoInstance).
@@ -40,7 +44,7 @@ use crate::instance::AnyApoInstance;
 /// `IAudioProcessingObject*`; methods on the COM interface route
 /// through this struct into the user's `ProcessingObject` via the
 /// type-erased trait.
-#[implement(IAudioProcessingObject)]
+#[implement(IAudioProcessingObject, IAudioProcessingObjectConfiguration)]
 pub struct ApoInstanceCom {
     instance: Arc<dyn AnyApoInstance>,
 }
@@ -130,6 +134,114 @@ impl IAudioProcessingObject_Impl for ApoInstanceCom_Impl {
             HRESULT::from(HResult::APOERR_NOT_LOCKED),
             "GetInputChannelCount called before LockForProcess wiring lands",
         ))
+    }
+}
+
+/// Extract a [`Format`] from a host-supplied
+/// [`APO_CONNECTION_DESCRIPTOR`].
+///
+/// # Safety
+///
+/// `descriptor` must point to a `APO_CONNECTION_DESCRIPTOR` whose
+/// `pFormat` is a valid `IAudioMediaType` (the audio engine
+/// guarantees this in `LockForProcess`). The returned `Format`
+/// holds a deep copy of the fields; no references survive the
+/// call.
+unsafe fn format_from_descriptor(
+    descriptor: *const APO_CONNECTION_DESCRIPTOR,
+) -> windows_core::Result<Format> {
+    if descriptor.is_null() {
+        return Err(windows_core::Error::new(
+            HRESULT::from(HResult::E_POINTER),
+            "APO_CONNECTION_DESCRIPTOR pointer was null",
+        ));
+    }
+    // Safety: caller guarantees the pointer is valid and the
+    // signature stamp is set by the audio engine.
+    let descriptor = unsafe { &*descriptor };
+    if descriptor.u32Signature != CONNECTION_PROPERTY_SIGNATURE {
+        return Err(windows_core::Error::new(
+            HRESULT::from(HResult::APOERR_INVALID_INPUT_DATA),
+            "APO_CONNECTION_DESCRIPTOR.u32Signature did not match 'APOC'",
+        ));
+    }
+    let Some(media_type) = descriptor.pFormat.as_ref() else {
+        return Err(windows_core::Error::new(
+            HRESULT::from(HResult::APOERR_FORMAT_NOT_SUPPORTED),
+            "APO_CONNECTION_DESCRIPTOR.pFormat was None",
+        ));
+    };
+    // Safety: media_type is a valid IAudioMediaType handed to us
+    // by the audio engine. GetAudioFormat returns an interior
+    // pointer the engine owns; we copy fields out via
+    // Format::from_waveformatex.
+    let wf_ptr = unsafe { media_type.GetAudioFormat() };
+    if wf_ptr.is_null() {
+        return Err(windows_core::Error::new(
+            HRESULT::from(HResult::APOERR_FORMAT_NOT_SUPPORTED),
+            "IAudioMediaType::GetAudioFormat returned null",
+        ));
+    }
+    // Safety: GetAudioFormat returns a pointer to a WAVEFORMATEX
+    // owned by the audio engine for the duration of the LockForProcess
+    // call; we read from it once and the Format wrapper copies the
+    // fields out.
+    Ok(Format::from_waveformatex(unsafe { &*wf_ptr }))
+}
+
+impl IAudioProcessingObjectConfiguration_Impl for ApoInstanceCom_Impl {
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
+    fn LockForProcess(
+        &self,
+        u32numinputconnections: u32,
+        ppinputconnections: *const *const APO_CONNECTION_DESCRIPTOR,
+        u32numoutputconnections: u32,
+        ppoutputconnections: *const *const APO_CONNECTION_DESCRIPTOR,
+    ) -> windows_core::Result<()> {
+        // The framework currently supports SISO APOs only — one
+        // input connection, one output connection — matching the
+        // architecture-doc constraint.
+        if u32numinputconnections != 1 || u32numoutputconnections != 1 {
+            return Err(windows_core::Error::new(
+                HRESULT::from(HResult::APOERR_NUM_CONNECTIONS_INVALID),
+                "framework supports exactly one input and one output connection",
+            ));
+        }
+        if ppinputconnections.is_null() || ppoutputconnections.is_null() {
+            return Err(windows_core::Error::new(
+                HRESULT::from(HResult::E_POINTER),
+                "connection-descriptor array pointer was null",
+            ));
+        }
+        // Safety: the audio engine guarantees the arrays hold the
+        // declared number of valid `APO_CONNECTION_DESCRIPTOR*`
+        // entries, and the count of 1 was checked above.
+        let input_desc = unsafe { *ppinputconnections };
+        let output_desc = unsafe { *ppoutputconnections };
+
+        // Safety: extracted descriptors are valid per the engine's
+        // contract; format_from_descriptor performs its own null /
+        // signature checks.
+        let input_format = unsafe { format_from_descriptor(input_desc) }?;
+        let output_format = unsafe { format_from_descriptor(output_desc) }?;
+
+        self.instance
+            .lock_for_process(&input_format, &output_format)
+            .map_err(|e| {
+                windows_core::Error::new(
+                    HRESULT::from(e),
+                    "ProcessingObject::lock_for_process failed",
+                )
+            })
+    }
+
+    fn UnlockForProcess(&self) -> windows_core::Result<()> {
+        self.instance.unlock_for_process().map_err(|e| {
+            windows_core::Error::new(
+                HRESULT::from(e),
+                "ProcessingObject::unlock_for_process failed",
+            )
+        })
     }
 }
 
