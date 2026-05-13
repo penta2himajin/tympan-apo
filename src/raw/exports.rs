@@ -1,14 +1,18 @@
-//! COM in-process server entry points.
+//! Shared helpers for the COM in-process server entry points.
 //!
-//! Every APO `.dll` exports the four standard COM in-process server
-//! functions below. The Windows audio engine resolves these by name
-//! at load time (Tier 2 verification checks they are present and
-//! unmangled via `dumpbin /exports`).
+//! Every APO `.dll` exports the four standard COM functions
+//! `DllGetClassObject`, `DllCanUnloadNow`, `DllRegisterServer`,
+//! and `DllUnregisterServer`. Those exports are emitted by the
+//! [`crate::register_apo!`] macro at the user's crate-root scope —
+//! the framework crate itself does not produce them, since the
+//! macro's emitted exports would otherwise collide with framework
+//! ones at link time.
 //!
-//! Current behaviour: the entry points are wired up at the ABI
-//! boundary but report no-class-available / no-op. The
-//! `IClassFactory` machinery, registry writes, and ref-count
-//! bookkeeping land in later commits.
+//! This module supplies the reusable building block the macro's
+//! emitted `DllGetClassObject` calls into:
+//! [`dll_get_class_object_dispatch`] — a CLSID-to-factory lookup
+//! that materialises an [`ApoClassFactory`] and routes the
+//! requested IID through `IUnknown::QueryInterface`.
 
 use core::ffi::c_void;
 
@@ -18,30 +22,26 @@ use crate::clsid::Clsid;
 use crate::error::HResult;
 use crate::raw::class_factory::{ApoClassFactory, ApoVTable};
 
-/// `S_OK = 0x00000000`.
-const S_OK: HRESULT = HRESULT(0);
-
-/// `S_FALSE = 0x00000001`. Returned by `DllCanUnloadNow` while the
-/// DLL still has live objects.
-const S_FALSE: HRESULT = HRESULT(1);
-
-/// CLSID → factory dispatch shared by `DllGetClassObject` and the
-/// future `register_apo!` macro.
+/// CLSID → factory dispatch shared by every user-emitted
+/// `DllGetClassObject`.
 ///
 /// Looks up `rclsid` in `registry`, materialises an
-/// [`ApoClassFactory`] for the matching [`ApoVTable`], wraps it in a
-/// COM object, and routes the requested `riid` through
+/// [`ApoClassFactory`] for the matching [`ApoVTable`], wraps it in
+/// a COM object, and routes the requested `riid` through
 /// `IUnknown::QueryInterface`. Returns `CLASS_E_CLASSNOTAVAILABLE`
-/// if the CLSID is not registered, `E_POINTER` if `ppv` is null.
+/// if the CLSID is not registered, `E_POINTER` if `ppv` (or
+/// `rclsid` / `riid`) is null.
 ///
 /// # Safety
 ///
 /// Called from COM entry points. The caller must guarantee:
 ///
 /// - `rclsid` points to a valid `GUID` for the lifetime of this
-///   call.
+///   call (or is null, in which case the function returns
+///   `E_POINTER`).
 /// - `riid` points to a valid `GUID` for the lifetime of this
-///   call.
+///   call (or is null, in which case the function returns
+///   `E_POINTER`).
 /// - `ppv` points to a writable `*mut c_void` slot, or is null
 ///   (in which case the function returns `E_POINTER` without
 ///   dereferencing it).
@@ -74,68 +74,6 @@ pub unsafe fn dll_get_class_object_dispatch(
     // Safety: unknown is a valid IUnknown pointer; the COM
     // caller guarantees `riid` and `ppv` are valid.
     unsafe { unknown.query(riid, ppv) }
-}
-
-/// COM class object factory entry point.
-///
-/// # Safety
-///
-/// Called by COM. `rclsid` and `riid` must point to valid `GUID`s
-/// and `ppv` must point to a writable pointer slot. The function
-/// follows the standard COM contract: on `CLASS_E_CLASSNOTAVAILABLE`
-/// the slot is zeroed before returning.
-///
-/// The framework's own export carries an empty registry; the
-/// `register_apo!` macro (follow-up PR) will let users override
-/// this with their own non-empty list.
-#[no_mangle]
-pub unsafe extern "system" fn DllGetClassObject(
-    rclsid: *const GUID,
-    riid: *const GUID,
-    ppv: *mut *mut c_void,
-) -> HRESULT {
-    // Safety: forwards the same contract we received.
-    unsafe { dll_get_class_object_dispatch(rclsid, riid, ppv, &[]) }
-}
-
-/// Returns `S_OK` if the DLL has no outstanding object references
-/// and may be unloaded, otherwise `S_FALSE`.
-///
-/// # Safety
-///
-/// Called by COM. The placeholder implementation never reports the
-/// DLL as unloadable so the host keeps it loaded; once the
-/// reference counter is wired in, this will consult it.
-#[no_mangle]
-pub unsafe extern "system" fn DllCanUnloadNow() -> HRESULT {
-    // Stub: with no live objects yet there is nothing to count, but
-    // returning S_FALSE is the safer placeholder while
-    // `DllGetClassObject` cannot actually hand out objects.
-    S_FALSE
-}
-
-/// Self-registration entry point invoked by `regsvr32.exe`.
-///
-/// # Safety
-///
-/// Called by `regsvr32`. The current implementation does not touch
-/// the registry; once `registration` lands it will write the CLSID
-/// keys under `HKCU\Software\Classes\CLSID\{...}` (per-user) or
-/// `HKLM\...` (machine, with admin).
-#[no_mangle]
-pub unsafe extern "system" fn DllRegisterServer() -> HRESULT {
-    S_OK
-}
-
-/// Inverse of `DllRegisterServer`.
-///
-/// # Safety
-///
-/// Called by `regsvr32 /u`. Mirrors `DllRegisterServer`'s stub
-/// behaviour for now.
-#[no_mangle]
-pub unsafe extern "system" fn DllUnregisterServer() -> HRESULT {
-    S_OK
 }
 
 #[cfg(test)]

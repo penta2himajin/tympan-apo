@@ -53,3 +53,16 @@ pub use buffer::{BufferFlags, ConnectionProperty, CONNECTION_PROPERTY_SIGNATURE}
 pub use clsid::Clsid;
 pub use error::HResult;
 pub use format::{Format, FormatNegotiation};
+
+/// Re-export of `windows_core::GUID` so the `register_apo!` macro's
+/// emitted entry-point signatures resolve without users having to
+/// add `windows-core` to their own `Cargo.toml`.
+#[cfg(windows)]
+pub use windows_core::GUID;
+
+/// Re-export of `windows_core::HRESULT`. Same rationale as [`GUID`].
+#[cfg(windows)]
+pub use windows_core::HRESULT;
+
+#[cfg(windows)]
+mod macros;
