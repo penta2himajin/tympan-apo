@@ -21,3 +21,4 @@ pub mod exports;
 pub mod instance_com;
 pub mod media_type;
 pub mod reg_properties;
+pub mod register;

@@ -40,8 +40,10 @@ aec = []
 version = "0.62"
 features = [
     "Win32_Foundation",
+    "Win32_Security",
     "Win32_System_Com",
     "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
     "Win32_Media_Audio",
     "Win32_Media_Audio_Apo",
     "Win32_Media_KernelStreaming",

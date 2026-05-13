@@ -125,26 +125,29 @@ macro_rules! register_apo {
 
         /// COM self-registration entry point.
         ///
-        /// Returns `S_OK` without touching the registry; real
-        /// CLSID-key writes land alongside the registration
-        /// helper in a later PR.
+        /// Writes the per-user `HKEY_CURRENT_USER\Software\Classes\CLSID\{<clsid>}`
+        /// subtree expected by the COM activator; see
+        /// [`tympan_apo::raw::register`] for the value layout.
+        /// Pair with `regsvr32 /n /i:user <dll>` — `/n` skips the
+        /// default machine-wide registration that requires admin.
         ///
         /// # Safety
         ///
         /// Called by `regsvr32`; takes no parameters.
         #[no_mangle]
         pub unsafe extern "system" fn DllRegisterServer() -> $crate::HRESULT {
-            $crate::HRESULT(0)
+            $crate::raw::exports::dll_register_server_dispatch(&__TYMPAN_APO_REGISTRY)
         }
 
-        /// Inverse of `DllRegisterServer`. See its documentation.
+        /// Inverse of `DllRegisterServer`. Idempotent — missing
+        /// keys are not an error.
         ///
         /// # Safety
         ///
         /// Called by `regsvr32 /u`; takes no parameters.
         #[no_mangle]
         pub unsafe extern "system" fn DllUnregisterServer() -> $crate::HRESULT {
-            $crate::HRESULT(0)
+            $crate::raw::exports::dll_unregister_server_dispatch(&__TYMPAN_APO_REGISTRY)
         }
     };
 }
