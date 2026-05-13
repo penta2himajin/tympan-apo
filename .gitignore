@@ -1,0 +1,15 @@
+/target
+**/*.rs.bk
+Cargo.lock
+
+# Windows build artifacts
+*.dll
+*.lib
+*.pdb
+*.exp
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
