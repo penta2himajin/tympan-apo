@@ -51,4 +51,6 @@ conditions.
 | [`docs/overview.md`](docs/overview.md) | Project purpose, scope, comparison to existing implementations |
 | [`docs/architecture.md`](docs/architecture.md) | Planned API design and module layout |
 | [`docs/references.md`](docs/references.md) | Microsoft documentation, prior art, related crates |
+| [`docs/testing.md`](docs/testing.md) | Testing and CI strategy across GitHub-hosted Windows runners |
+| [`docs/decisions/`](docs/decisions/) | Architecture Decision Records (ADRs) |
 | [`docs/handoff-protocol.md`](docs/handoff-protocol.md) | Session handoff protocol for long-running work |
