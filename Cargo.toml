@@ -60,7 +60,13 @@ static_assertions = "1.1"
 # `assert_no_alloc(|| { ... })` span when an allocation traverses
 # the hook. Wired up in `tests/realtime_safety.rs` to enforce
 # CLAUDE.md prohibition #1.
-assert_no_alloc = "1.1"
+#
+# `default-features = false` switches off the `disable_release`
+# feature so `AllocDisabler` stays defined when the release-profile
+# test binary is compiled (Tier 1's `cargo build --release
+# --all-targets` step compiles every test target as release,
+# regardless of whether the test itself is run in debug or release).
+assert_no_alloc = { version = "1.1", default-features = false }
 
 [profile.release]
 lto = "thin"
