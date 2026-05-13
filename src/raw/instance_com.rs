@@ -218,10 +218,11 @@ unsafe fn format_from_descriptor(
         ));
     }
     // Safety: GetAudioFormat returns a pointer to a WAVEFORMATEX
-    // owned by the audio engine for the duration of the LockForProcess
-    // call; we read from it once and the Format wrapper copies the
-    // fields out.
-    Ok(Format::from_waveformatex(unsafe { &*wf_ptr }))
+    // owned by the audio engine for the duration of the
+    // LockForProcess call. `from_waveformatex_ptr` examines the
+    // `cbSize` / `wFormatTag` markers to pick WAVEFORMATEX vs
+    // WAVEFORMATEXTENSIBLE and copies the fields out.
+    Ok(unsafe { Format::from_waveformatex_ptr(wf_ptr) })
 }
 
 impl IAudioProcessingObjectConfiguration_Impl for ApoInstanceCom_Impl {

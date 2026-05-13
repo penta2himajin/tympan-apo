@@ -27,12 +27,17 @@
 use windows::Win32::Media::Audio::Apo::{
     APO_BUFFER_FLAGS, APO_CONNECTION_PROPERTY, APO_REG_PROPERTIES,
 };
-use windows::Win32::Media::Audio::WAVEFORMATEX;
+use windows::Win32::Media::Audio::{WAVEFORMATEX, WAVEFORMATEXTENSIBLE};
 use windows_core::GUID;
 
 // WAVEFORMATEX: packed(1).
 const _: () = assert!(core::mem::size_of::<WAVEFORMATEX>() == 18);
 const _: () = assert!(core::mem::align_of::<WAVEFORMATEX>() == 1);
+
+// WAVEFORMATEXTENSIBLE: packed(1); WAVEFORMATEX (18) + Samples
+// union (2) + dwChannelMask (4) + SubFormat (16) = 40 bytes.
+const _: () = assert!(core::mem::size_of::<WAVEFORMATEXTENSIBLE>() == 40);
+const _: () = assert!(core::mem::align_of::<WAVEFORMATEXTENSIBLE>() == 1);
 
 // APO_BUFFER_FLAGS is a `#[repr(transparent)]` newtype over i32,
 // matching the C `enum APO_BUFFER_FLAGS` storage class.

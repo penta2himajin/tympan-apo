@@ -42,31 +42,37 @@ extern crate alloc;
 use windows::Win32::Media::Audio::Apo::{
     IAudioMediaType, IAudioMediaType_Impl, UNCOMPRESSEDAUDIOFORMAT,
 };
-use windows::Win32::Media::Audio::WAVEFORMATEX;
+use windows::Win32::Media::Audio::{WAVEFORMATEX, WAVEFORMATEXTENSIBLE};
 use windows_core::{implement, ComObject, Ref, BOOL, HRESULT};
 
 use crate::error::HResult;
 use crate::format::{Format, FormatNegotiation};
 use crate::instance::AnyApoInstance;
 
-/// In-process `IAudioMediaType` carrier owning a `WAVEFORMATEX`.
-///
-/// Returned from the framework's `IsInputFormatSupported` /
-/// `IsOutputFormatSupported` answers; the audio engine reads the
-/// underlying format back through `IAudioMediaType::GetAudioFormat`.
+/// In-process `IAudioMediaType` carrier owning a
+/// `WAVEFORMATEXTENSIBLE`. The wrapper always allocates the full
+/// extensible struct so callers requesting an extensible format
+/// can read the channel-mask / sub-format extension; non-extensible
+/// formats set `cbSize == 0` and the engine reads only the
+/// `WAVEFORMATEX` prefix.
 #[implement(IAudioMediaType)]
 pub struct FormatMediaType {
-    wf: WAVEFORMATEX,
+    wfx: WAVEFORMATEXTENSIBLE,
 }
 
 impl FormatMediaType {
-    /// Construct a [`FormatMediaType`] holding the `WAVEFORMATEX`
-    /// projection of `format`.
+    /// Construct a [`FormatMediaType`] holding the
+    /// `WAVEFORMATEXTENSIBLE` projection of `format`. The `cbSize`
+    /// field disambiguates the two cases at the wire level: 0
+    /// means "WAVEFORMATEX prefix only", 22 means "full extensible
+    /// extension present".
     #[must_use]
     pub fn new(format: &Format) -> Self {
-        Self {
-            wf: format.to_waveformatex(),
+        let mut wfx = format.to_waveformatextensible();
+        if !format.is_extensible() {
+            wfx.Format.cbSize = 0;
         }
+        Self { wfx }
     }
 }
 
@@ -87,10 +93,10 @@ impl IAudioMediaType_Impl for FormatMediaType_Impl {
     }
 
     fn GetAudioFormat(&self) -> *mut WAVEFORMATEX {
-        // Interior pointer into the wrapper's owned WAVEFORMATEX.
-        // The audio engine only reads through the pointer during
-        // the lifetime of the wrapper's IAudioMediaType reference.
-        core::ptr::addr_of!(self.wf) as *mut WAVEFORMATEX
+        // Interior pointer to the WAVEFORMATEX prefix of the owned
+        // WAVEFORMATEXTENSIBLE. The audio engine reads `cbSize` to
+        // decide whether to inspect the extension past it.
+        core::ptr::addr_of!(self.wfx.Format) as *mut WAVEFORMATEX
     }
 
     fn GetUncompressedAudioFormat(
@@ -141,9 +147,11 @@ pub fn format_from_media_type(media: Ref<'_, IAudioMediaType>) -> windows_core::
         ));
     }
     // Safety: GetAudioFormat returned non-null; the pointee is
-    // valid for the duration of the call. Format::from_waveformatex
-    // copies the fields out.
-    Ok(Format::from_waveformatex(unsafe { &*wf_ptr }))
+    // valid for the duration of the call.
+    // `from_waveformatex_ptr` examines `cbSize` / `wFormatTag` to
+    // pick the right read shape (WAVEFORMATEX vs
+    // WAVEFORMATEXTENSIBLE) and copies the fields out.
+    Ok(unsafe { Format::from_waveformatex_ptr(wf_ptr) })
 }
 
 /// Which direction of negotiation a bridge call is servicing.
