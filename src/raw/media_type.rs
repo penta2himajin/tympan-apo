@@ -61,16 +61,27 @@ pub struct FormatMediaType {
 }
 
 impl FormatMediaType {
-    /// Construct a [`FormatMediaType`] holding the
-    /// `WAVEFORMATEXTENSIBLE` projection of `format`. The `cbSize`
-    /// field disambiguates the two cases at the wire level: 0
-    /// means "WAVEFORMATEX prefix only", 22 means "full extensible
-    /// extension present".
+    /// Construct a [`FormatMediaType`] holding either a
+    /// `WAVEFORMATEXTENSIBLE` projection of `format` (when the
+    /// format is extensible) or a base `WAVEFORMATEX` embedded
+    /// into the WAVEFORMATEX prefix of a zeroed
+    /// `WAVEFORMATEXTENSIBLE` (when it is not). The wire-side
+    /// `cbSize` field disambiguates the two cases: 0 means
+    /// "WAVEFORMATEX prefix only, ignore the trailing bytes", 22
+    /// means "full extensible extension present".
     #[must_use]
     pub fn new(format: &Format) -> Self {
-        let mut wfx = format.to_waveformatextensible();
-        if !format.is_extensible() {
-            wfx.Format.cbSize = 0;
+        // Safety: zero-initialising WAVEFORMATEXTENSIBLE is sound;
+        // every field is plain old data. We immediately overwrite
+        // the meaningful slots below.
+        let mut wfx: WAVEFORMATEXTENSIBLE = unsafe { core::mem::zeroed() };
+        if format.is_extensible() {
+            wfx = format.to_waveformatextensible();
+        } else {
+            // Plain `WAVEFORMATEX` with `cbSize = 0` and the
+            // logical PCM / IEEE_FLOAT format tag — the extension
+            // bytes stay zero and the engine ignores them.
+            wfx.Format = format.to_waveformatex();
         }
         Self { wfx }
     }
