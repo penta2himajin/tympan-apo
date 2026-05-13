@@ -1,7 +1,7 @@
 //! Shared dispatch helpers for the COM-side method bodies that
 //! both [`ApoInstanceCom`](crate::raw::instance_com::ApoInstanceCom)
-//! and [`AecApoInstanceCom`](crate::aec::instance_com::AecApoInstanceCom)
-//! delegate into.
+//! and `aec::instance_com::AecApoInstanceCom` (under the `aec`
+//! feature) delegate into.
 //!
 //! Why a separate module: the `windows_core::implement` proc-macro
 //! generates a per-struct `*_Impl` and binds trait impls to that
@@ -47,8 +47,8 @@ pub(crate) fn initialize(instance: &dyn AnyApoInstance) -> windows_core::Result<
 
 /// `IAudioProcessingObject::GetRegistrationProperties` body —
 /// SISO variant. The AEC carrier uses
-/// [`crate::aec::exports::build_aec_registration_properties`]
-/// directly to advertise the nine-IID interface list.
+/// `aec::exports::build_aec_registration_properties` directly to
+/// advertise the nine-IID interface list.
 pub(crate) fn get_registration_properties_siso(
     instance: &dyn AnyApoInstance,
 ) -> windows_core::Result<*mut APO_REG_PROPERTIES> {
