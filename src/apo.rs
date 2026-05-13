@@ -6,10 +6,58 @@
 //! instance via [`ProcessingObject::new`], drive the lifecycle, and
 //! forward audio buffers into [`ProcessingObject::process`].
 
+use crate::buffer::BufferFlags;
 use crate::clsid::Clsid;
 use crate::error::HResult;
 use crate::format::{Format, FormatNegotiation};
 use crate::realtime::RealtimeContext;
+
+/// Per-buffer input handed to [`ProcessingObject::process`].
+///
+/// Borrows an interleaved float32 sample buffer from the host and
+/// carries the [`BufferFlags`] the host stamped on it. Both
+/// fields are accessed through const fns so the wrapper is
+/// allocation-free and realtime-safe.
+#[derive(Copy, Clone, Debug)]
+pub struct ProcessInput<'a> {
+    samples: &'a [f32],
+    flags: BufferFlags,
+}
+
+impl<'a> ProcessInput<'a> {
+    /// Wrap a sample slice and the host's flag word.
+    ///
+    /// The framework's COM harness will construct one of these per
+    /// `APOProcess` invocation; tests construct them directly.
+    #[inline]
+    #[must_use]
+    pub const fn new(samples: &'a [f32], flags: BufferFlags) -> Self {
+        Self { samples, flags }
+    }
+
+    /// Interleaved float32 samples — `frame_count * channel_count`
+    /// elements long.
+    #[inline]
+    #[must_use]
+    pub const fn samples(&self) -> &'a [f32] {
+        self.samples
+    }
+
+    /// Flags the host stamped on this buffer.
+    #[inline]
+    #[must_use]
+    pub const fn flags(&self) -> BufferFlags {
+        self.flags
+    }
+
+    /// Convenience: `true` iff [`Self::flags`] is
+    /// [`BufferFlags::SILENT`].
+    #[inline]
+    #[must_use]
+    pub const fn is_silent(&self) -> bool {
+        self.flags.is_silent()
+    }
+}
 
 /// Category of an Audio Processing Object, as exposed via
 /// `IAudioSystemEffects` / `IAudioSystemEffects3`.
@@ -138,11 +186,24 @@ pub trait ProcessingObject: Sized + Send {
     /// take `&RealtimeContext` to make the constraint visible
     /// throughout the call graph.
     ///
-    /// `input` and `output` are interleaved float32 sample
-    /// buffers — `frame_count * channel_count` samples each. The
-    /// framework verifies they are the same length before
-    /// dispatch; implementors may rely on it.
-    fn process(&mut self, rt: &RealtimeContext, input: &[f32], output: &mut [f32]);
+    /// `input` carries the host's input samples and the
+    /// [`BufferFlags`] the host stamped on the buffer (the APO is
+    /// free to short-circuit when [`ProcessInput::is_silent`] is
+    /// `true`). `output` is the interleaved float32 buffer to
+    /// write into; the same length as `input.samples()` (the
+    /// framework enforces this before dispatching).
+    ///
+    /// The return value becomes the `u32BufferFlags` field of the
+    /// host's output `APO_CONNECTION_PROPERTY` — typically
+    /// [`BufferFlags::VALID`] for normal audio, or
+    /// [`BufferFlags::SILENT`] when the APO knows it wrote pure
+    /// silence and the engine may skip downstream work.
+    fn process(
+        &mut self,
+        rt: &RealtimeContext,
+        input: ProcessInput<'_>,
+        output: &mut [f32],
+    ) -> BufferFlags;
 }
 
 #[inline]
@@ -172,8 +233,14 @@ mod tests {
             Self
         }
 
-        fn process(&mut self, _rt: &RealtimeContext, input: &[f32], output: &mut [f32]) {
-            output.copy_from_slice(input);
+        fn process(
+            &mut self,
+            _rt: &RealtimeContext,
+            input: ProcessInput<'_>,
+            output: &mut [f32],
+        ) -> BufferFlags {
+            output.copy_from_slice(input.samples());
+            input.flags()
         }
     }
 
@@ -275,10 +342,49 @@ mod tests {
         // permitted here because the test exercises pure logic,
         // not realtime-thread-dependent behaviour.
         let mut apo = Passthrough::new();
-        let input = [0.1_f32, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7, -0.8];
+        let samples = [0.1_f32, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7, -0.8];
         let mut output = [0.0_f32; 8];
         let rt = unsafe { RealtimeContext::new_unchecked() };
-        apo.process(&rt, &input, &mut output);
-        assert_eq!(output, input);
+        let out_flags = apo.process(
+            &rt,
+            ProcessInput::new(&samples, BufferFlags::VALID),
+            &mut output,
+        );
+        assert_eq!(output, samples);
+        assert_eq!(out_flags, BufferFlags::VALID);
+    }
+
+    #[test]
+    fn process_input_exposes_samples_and_flags() {
+        let samples = [1.0_f32, 2.0, 3.0];
+        let input = ProcessInput::new(&samples, BufferFlags::SILENT);
+        assert_eq!(input.samples(), &samples);
+        assert_eq!(input.flags(), BufferFlags::SILENT);
+        assert!(input.is_silent());
+    }
+
+    #[test]
+    fn process_input_is_not_silent_when_flag_is_valid() {
+        let samples = [0.0_f32];
+        let input = ProcessInput::new(&samples, BufferFlags::VALID);
+        assert!(!input.is_silent());
+    }
+
+    #[test]
+    fn process_passes_through_input_flags() {
+        // Passthrough's implementation returns the input flags
+        // verbatim — verify each variant survives the round-trip.
+        let mut apo = Passthrough::new();
+        let rt = unsafe { RealtimeContext::new_unchecked() };
+        let samples = [0.5_f32; 4];
+        for f in [
+            BufferFlags::VALID,
+            BufferFlags::SILENT,
+            BufferFlags::INVALID,
+        ] {
+            let mut output = [0.0_f32; 4];
+            let out = apo.process(&rt, ProcessInput::new(&samples, f), &mut output);
+            assert_eq!(out, f);
+        }
     }
 }
