@@ -34,6 +34,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod apo;
+pub mod clsid;
 pub mod error;
 pub mod format;
 pub mod realtime;
@@ -46,5 +47,6 @@ pub mod raw;
 pub mod aec;
 
 pub use apo::ApoCategory;
+pub use clsid::Clsid;
 pub use error::HResult;
 pub use format::{Format, FormatNegotiation};
