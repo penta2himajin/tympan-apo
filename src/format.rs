@@ -152,6 +152,52 @@ impl Format {
     }
 }
 
+#[cfg(windows)]
+impl Format {
+    /// Construct a [`Format`] from a Windows
+    /// [`WAVEFORMATEX`](windows::Win32::Media::Audio::WAVEFORMATEX).
+    ///
+    /// Only the base `WAVEFORMATEX` fields are copied; `cbSize` and
+    /// any trailing extension bytes (as used by
+    /// `WAVEFORMATEXTENSIBLE`) are ignored. To round-trip an
+    /// extensible format, deal with the extension explicitly before
+    /// or after calling this routine.
+    ///
+    /// `WAVEFORMATEX` is `#[repr(C, packed(1))]`, so this function
+    /// performs the field copies through the `{ ... }` value-context
+    /// idiom rather than taking references into the packed layout.
+    #[must_use]
+    pub fn from_waveformatex(wf: &windows::Win32::Media::Audio::WAVEFORMATEX) -> Self {
+        Self {
+            format_tag: { wf.wFormatTag },
+            channels: { wf.nChannels },
+            samples_per_sec: { wf.nSamplesPerSec },
+            avg_bytes_per_sec: { wf.nAvgBytesPerSec },
+            block_align: { wf.nBlockAlign },
+            bits_per_sample: { wf.wBitsPerSample },
+        }
+    }
+
+    /// Project this [`Format`] into a Windows
+    /// [`WAVEFORMATEX`](windows::Win32::Media::Audio::WAVEFORMATEX).
+    ///
+    /// `cbSize` is zero, matching plain
+    /// `WAVE_FORMAT_PCM` / `WAVE_FORMAT_IEEE_FLOAT` streams with no
+    /// trailing extension data.
+    #[must_use]
+    pub fn to_waveformatex(&self) -> windows::Win32::Media::Audio::WAVEFORMATEX {
+        windows::Win32::Media::Audio::WAVEFORMATEX {
+            wFormatTag: self.format_tag,
+            nChannels: self.channels,
+            nSamplesPerSec: self.samples_per_sec,
+            nAvgBytesPerSec: self.avg_bytes_per_sec,
+            nBlockAlign: self.block_align,
+            wBitsPerSample: self.bits_per_sample,
+            cbSize: 0,
+        }
+    }
+}
+
 /// Outcome of `ProcessingObject::is_input_format_supported` (and
 /// its output counterpart) — to be defined in [`crate::apo`].
 ///
@@ -225,5 +271,94 @@ mod tests {
         assert_ne!(a, s);
         assert_ne!(s, r);
         assert_ne!(a, r);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_conv_tests {
+    use super::*;
+    use windows::Win32::Media::Audio::WAVEFORMATEX;
+
+    #[test]
+    fn windows_waveformatex_is_18_bytes_packed_one() {
+        // Sanity-check the windows crate's representation. If
+        // Microsoft ever changes WAVEFORMATEX's layout, the
+        // conversion routines need a closer look.
+        assert_eq!(core::mem::size_of::<WAVEFORMATEX>(), 18);
+        assert_eq!(core::mem::align_of::<WAVEFORMATEX>(), 1);
+    }
+
+    #[test]
+    fn pcm_float32_48k_mono_round_trips() {
+        let f = Format::pcm_float32(48_000, 1);
+        let wf = f.to_waveformatex();
+        assert_eq!({ wf.wFormatTag }, WAVE_FORMAT_IEEE_FLOAT);
+        assert_eq!({ wf.nChannels }, 1);
+        assert_eq!({ wf.nSamplesPerSec }, 48_000);
+        assert_eq!({ wf.nAvgBytesPerSec }, 48_000 * 4);
+        assert_eq!({ wf.nBlockAlign }, 4);
+        assert_eq!({ wf.wBitsPerSample }, 32);
+        assert_eq!({ wf.cbSize }, 0);
+
+        let f2 = Format::from_waveformatex(&wf);
+        assert_eq!(f, f2);
+    }
+
+    #[test]
+    fn every_typed_constructor_round_trips() {
+        for f in [
+            Format::pcm_int16(44_100, 2),
+            Format::pcm_int24(48_000, 1),
+            Format::pcm_int32(96_000, 4),
+            Format::pcm_float32(48_000, 1),
+            Format::pcm_float64(192_000, 8),
+        ] {
+            let wf = f.to_waveformatex();
+            let f2 = Format::from_waveformatex(&wf);
+            assert_eq!(f, f2, "round-trip failed for {f:?}");
+        }
+    }
+
+    #[test]
+    fn from_waveformatex_preserves_all_base_fields() {
+        let wf = WAVEFORMATEX {
+            wFormatTag: WAVE_FORMAT_PCM,
+            nChannels: 2,
+            nSamplesPerSec: 44_100,
+            nAvgBytesPerSec: 44_100 * 4,
+            nBlockAlign: 4,
+            wBitsPerSample: 16,
+            cbSize: 0,
+        };
+        let f = Format::from_waveformatex(&wf);
+        assert_eq!(f.format_tag(), WAVE_FORMAT_PCM);
+        assert_eq!(f.channels(), 2);
+        assert_eq!(f.sample_rate(), 44_100);
+        assert_eq!(f.avg_bytes_per_sec(), 44_100 * 4);
+        assert_eq!(f.block_align(), 4);
+        assert_eq!(f.bits_per_sample(), 16);
+    }
+
+    #[test]
+    fn from_waveformatex_ignores_cbsize() {
+        // The trailing extension bytes are out of scope for
+        // `Format`. We make sure a non-zero cbSize does not affect
+        // the resulting `Format`.
+        let wf = WAVEFORMATEX {
+            wFormatTag: WAVE_FORMAT_EXTENSIBLE,
+            nChannels: 6,
+            nSamplesPerSec: 48_000,
+            nAvgBytesPerSec: 48_000 * 24,
+            nBlockAlign: 24,
+            wBitsPerSample: 32,
+            cbSize: 22, // sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)
+        };
+        let f = Format::from_waveformatex(&wf);
+        assert_eq!(f.format_tag(), WAVE_FORMAT_EXTENSIBLE);
+        assert_eq!(f.channels(), 6);
+        assert_eq!(f.sample_rate(), 48_000);
+        // `Format::to_waveformatex` zeroes cbSize again, which is
+        // the documented behaviour for the lossy round-trip.
+        assert_eq!({ f.to_waveformatex().cbSize }, 0);
     }
 }
