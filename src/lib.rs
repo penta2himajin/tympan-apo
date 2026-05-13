@@ -34,6 +34,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod apo;
+pub mod buffer;
 pub mod clsid;
 pub mod error;
 pub mod format;
@@ -47,6 +48,7 @@ pub mod raw;
 pub mod aec;
 
 pub use apo::{ApoCategory, ProcessingObject};
+pub use buffer::{BufferFlags, ConnectionProperty, CONNECTION_PROPERTY_SIGNATURE};
 pub use clsid::Clsid;
 pub use error::HResult;
 pub use format::{Format, FormatNegotiation};
