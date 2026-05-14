@@ -11,9 +11,9 @@
 //! - [`realtime`] — allocation-free, lock-free primitives intended
 //!   for use from the `APOProcess` realtime callback. Cross-platform
 //!   so that the realtime invariants can be unit-tested on any host.
-//! - Public API (this module plus [`apo`], [`instance`], [`format`],
-//!   and the other crate-root modules) — safe, idiomatic wrappers
-//!   users implement against.
+//! - Public API (this module plus [`apo`], [`instance`],
+//!   [`mod@format`], and the other crate-root modules) — safe,
+//!   idiomatic wrappers users implement against.
 //! - `aec` — Windows 11 Acoustic Echo Cancellation APO support.
 //!   Windows-only and gated behind the `aec` Cargo feature.
 //!
