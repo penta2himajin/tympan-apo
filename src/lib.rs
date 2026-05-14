@@ -1,8 +1,7 @@
 //! `tympan-apo` — Rust framework for Windows Audio Processing Objects.
 //!
 //! See `docs/overview.md` and `docs/architecture.md` for the design
-//! that drives this crate. This is the initial skeleton: only the
-//! module layout and a small number of marker types exist so far.
+//! that drives this crate.
 //!
 //! The crate is organised into four conceptual layers, isolated by
 //! module boundary:
@@ -12,8 +11,9 @@
 //! - [`realtime`] — allocation-free, lock-free primitives intended
 //!   for use from the `APOProcess` realtime callback. Cross-platform
 //!   so that the realtime invariants can be unit-tested on any host.
-//! - Public API (this module) — safe, idiomatic wrappers users
-//!   implement against. Currently empty.
+//! - Public API (this module plus [`apo`], [`instance`],
+//!   [`mod@format`], and the other crate-root modules) — safe,
+//!   idiomatic wrappers users implement against.
 //! - `aec` — Windows 11 Acoustic Echo Cancellation APO support.
 //!   Windows-only and gated behind the `aec` Cargo feature.
 //!
@@ -23,11 +23,6 @@
 //! allocation-free, lock-free, and free of blocking syscalls. The
 //! [`realtime`] module exposes a `RealtimeContext` marker that acts
 //! as a compile-time witness for the realtime context.
-//!
-//! ## Status
-//!
-//! Design phase. The COM bindings, lifecycle harness, registration
-//! helpers, and reference example APOs are not yet implemented.
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![deny(missing_docs)]

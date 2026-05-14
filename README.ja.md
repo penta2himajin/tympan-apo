@@ -42,7 +42,7 @@ Rust コードから参加できます。
 CI は Tier 1 (fmt、clippy、build/test)、Tier 2 (複数 DLL の
 エクスポート・依存関係・署名検証)、Tier 3 (AEC 派生を含む COM
 ライフサイクルハーネスと AddressSanitizer nightly) を実行します。
-API 設計案は [`docs/architecture.md`](docs/architecture.md)、CI 戦略は
+API 設計は [`docs/architecture.md`](docs/architecture.md)、CI 戦略は
 [`docs/testing.md`](docs/testing.md) を参照してください。
 日本語版ドキュメントは [`docs/ja/`](docs/ja/) 配下にあります。
 
@@ -76,7 +76,7 @@ API 設計案は [`docs/architecture.md`](docs/architecture.md)、CI 戦略は
 | ドキュメント | 内容 |
 |---|---|
 | [`docs/ja/overview.md`](docs/ja/overview.md) | プロジェクトの目的、スコープ、既存実装との比較 |
-| [`docs/ja/architecture.md`](docs/ja/architecture.md) | API 設計案とモジュール構成 |
+| [`docs/ja/architecture.md`](docs/ja/architecture.md) | API 設計とモジュール構成 |
 | [`docs/ja/references.md`](docs/ja/references.md) | Microsoft 公式ドキュメント、先行事例、関連クレート |
 | [`docs/ja/testing.md`](docs/ja/testing.md) | GitHub ホスト Windows ランナーを跨ぐテスト・CI 戦略 |
 | [`docs/decisions/`](docs/decisions/) | アーキテクチャ決定記録 (ADR) (英語のみ) |
