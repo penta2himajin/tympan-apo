@@ -11,22 +11,15 @@ Detailed design lives under @docs/overview.md and @docs/architecture.md.
 
 ## Project Structure
 
-Currently in design phase. No source code yet.
-
-```
-docs/                    # Design and references
-.github/                 # Issue/PR templates
-```
-
-Once implementation begins, the layout will follow:
-
 ```
 src/                     # Public API (high-level, safe)
 src/raw/                 # Low-level FFI: COM interface bindings
 src/realtime/            # Realtime-safe primitives (lock-free, alloc-free)
 src/aec/                 # Windows 11 AEC APO API support
-examples/                # Reference APOs (e.g. gain, passthrough)
+examples/                # Reference APOs (passthrough, gain, aec_scaffold)
 tests/                   # Integration tests
+docs/                    # Design and references
+.github/                 # Issue/PR templates, CI workflows
 ```
 
 ## Development Setup
@@ -45,8 +38,6 @@ For AEC APO API features:
 - Target machine running Windows 11
 
 ## Build & Test
-
-Once implementation starts:
 
 ```bash
 cargo build --release --target x86_64-pc-windows-msvc

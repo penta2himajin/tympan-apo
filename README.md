@@ -15,9 +15,34 @@ processing slot in the microphone capture pipeline.
 
 ## Status
 
-**Design phase.** No implementation yet. See [`docs/overview.md`](docs/overview.md)
-for planned scope and [`docs/architecture.md`](docs/architecture.md) for the
-planned API design.
+**Intended functionality complete.** Every "In scope" item from
+[`docs/overview.md`](docs/overview.md) is implemented:
+
+- COM object infrastructure — IUnknown, IClassFactory, registration,
+  and the four `Dll*` exports ([`src/raw/`](src/raw/)).
+- The required interface set — `IAudioProcessingObject` family plus
+  `IAudioSystemEffects` v1/v2/v3 — and the SFX, MFX, and EFX
+  categories.
+- AEC APO support ([`src/aec/`](src/aec/)): the `AecProcessingObject`
+  foundation, the COM bridge (`AecApoInstanceCom` + `register_aec_apo!`),
+  and the `aec_scaffold` example, gated behind the `aec` feature.
+- Format negotiation for both `WAVEFORMATEX` and
+  `WAVEFORMATEXTENSIBLE` ([`src/format.rs`](src/format.rs)).
+- Realtime-safe primitives ([`src/realtime/`](src/realtime/)): a
+  lock-free ring buffer, atomic state helpers, and an atomic refcount.
+- Registration helpers ([`src/clsid.rs`](src/clsid.rs),
+  [`src/raw/register.rs`](src/raw/register.rs),
+  [`src/inf.rs`](src/inf.rs),
+  [`src/fx_properties.rs`](src/fx_properties.rs)): CLSID assignment,
+  registry writes, an INF generator, and FxProperties endpoint binding.
+- Example APOs under [`examples/`](examples/): `passthrough`, `gain`,
+  and `aec_scaffold`.
+
+CI runs Tier 1 (fmt, clippy, build/test), Tier 2 (multi-DLL export,
+dependency, and signing verification), and Tier 3 (the COM lifecycle
+harness, including the AEC variant, plus an AddressSanitizer nightly).
+See [`docs/architecture.md`](docs/architecture.md) for the API design
+and [`docs/testing.md`](docs/testing.md) for the CI strategy.
 
 ## Naming
 

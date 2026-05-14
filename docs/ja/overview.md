@@ -101,13 +101,27 @@ Rust 向けの公式バインディングやフレームワークは存在しま
 
 ## ステータス
 
-**設計フェーズ。** 初回コミット時点では:
+**意図した機能は実装完了。** 上記「スコープに含まれるもの」の各項目は
+すべて実装済みです。
 
-- `src/` にソースコードはまだありません
-- API 設計は [`architecture.md`](architecture.md) に記述
-- 参考資料は [`references.md`](references.md) に集約
+- ✅ COM オブジェクト基盤 (IUnknown, IClassFactory, 登録)
+- ✅ 必須インターフェース — `IAudioProcessingObject` ファミリと
+  `IAudioSystemEffects` v1/v2/v3
+- ✅ SFX・MFX・EFX カテゴリ
+- ✅ AEC APO 対応 (基盤 + COM ブリッジ + `aec` フィーチャー派生)
+- ✅ フォーマットネゴシエーション (`WAVEFORMATEX` +
+  `WAVEFORMATEXTENSIBLE`)
+- ✅ リアルタイム安全なプリミティブ (ロックフリーリングバッファ、
+  アトミック状態、アトミック参照カウント)
+- ✅ 登録補助 (CLSID、レジストリ、INF 生成、FxProperties エンド
+  ポイントバインディング)
+- ✅ サンプル APO (`passthrough`, `gain`, `aec_scaffold`)
 
-API 設計のレビューと安定化を経てから実装を開始します。
+CI は Tier 1 (fmt, clippy, build/test)、Tier 2 (複数 DLL の
+エクスポート・依存関係・署名検証)、Tier 3 (AEC 派生を含む COM
+ライフサイクルハーネスと AddressSanitizer nightly) をカバーします。
+API 設計は [`architecture.md`](architecture.md)、CI 戦略は
+[`testing.md`](testing.md) を参照してください。
 
 ## 対象読者
 

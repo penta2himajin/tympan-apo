@@ -15,10 +15,36 @@ Rust コードから参加できます。
 
 ## ステータス
 
-**設計フェーズ。** 実装はまだ存在しません。想定スコープは
-[`docs/overview.md`](docs/overview.md)、API 設計案は
-[`docs/architecture.md`](docs/architecture.md) を参照してください。
-日本語版は [`docs/ja/`](docs/ja/) 配下にあります。
+**意図した機能は実装完了。** [`docs/ja/overview.md`](docs/ja/overview.md)
+の「スコープに含まれるもの」の各項目はすべて実装済みです。
+
+- COM オブジェクト基盤 — IUnknown、IClassFactory、登録、4 つの `Dll*`
+  エクスポート ([`src/raw/`](src/raw/))。
+- 必須インターフェース群 — `IAudioProcessingObject` ファミリと
+  `IAudioSystemEffects` v1/v2/v3 — および SFX・MFX・EFX カテゴリ。
+- AEC APO 対応 ([`src/aec/`](src/aec/)): `AecProcessingObject` 基盤、
+  COM ブリッジ (`AecApoInstanceCom` + `register_aec_apo!`)、
+  `aec_scaffold` サンプル。いずれも `aec` フィーチャーでゲートされます。
+- `WAVEFORMATEX` と `WAVEFORMATEXTENSIBLE` 両方のフォーマット
+  ネゴシエーション ([`src/format.rs`](src/format.rs))。
+- リアルタイム安全なプリミティブ ([`src/realtime/`](src/realtime/)):
+  ロックフリーリングバッファ、アトミック状態ヘルパー、アトミック
+  参照カウント。
+- 登録補助 ([`src/clsid.rs`](src/clsid.rs)、
+  [`src/raw/register.rs`](src/raw/register.rs)、
+  [`src/inf.rs`](src/inf.rs)、
+  [`src/fx_properties.rs`](src/fx_properties.rs)): CLSID 割り当て、
+  レジストリ書き込み、INF ジェネレータ、FxProperties エンドポイント
+  バインディング。
+- サンプル APO ([`examples/`](examples/)): `passthrough`、`gain`、
+  `aec_scaffold`。
+
+CI は Tier 1 (fmt、clippy、build/test)、Tier 2 (複数 DLL の
+エクスポート・依存関係・署名検証)、Tier 3 (AEC 派生を含む COM
+ライフサイクルハーネスと AddressSanitizer nightly) を実行します。
+API 設計案は [`docs/architecture.md`](docs/architecture.md)、CI 戦略は
+[`docs/testing.md`](docs/testing.md) を参照してください。
+日本語版ドキュメントは [`docs/ja/`](docs/ja/) 配下にあります。
 
 ## 名前の由来
 
