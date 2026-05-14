@@ -101,14 +101,26 @@ Object.
 
 ## Status
 
-**Design phase.** As of the initial commit:
+**Intended functionality complete.** Every "In scope" item above is
+implemented:
 
-- No source code in `src/`
-- API design documented in [`architecture.md`](architecture.md)
-- Reference material gathered in [`references.md`](references.md)
+- ✅ COM object infrastructure (IUnknown, IClassFactory, registration)
+- ✅ Required interfaces — `IAudioProcessingObject` family plus
+  `IAudioSystemEffects` v1/v2/v3
+- ✅ SFX, MFX, and EFX categories
+- ✅ AEC APO support (foundation + COM bridge + `aec` feature variant)
+- ✅ Format negotiation (`WAVEFORMATEX` + `WAVEFORMATEXTENSIBLE`)
+- ✅ Realtime-safe primitives (lock-free ring buffer, atomic state,
+  atomic refcount)
+- ✅ Registration helpers (CLSID, registry, INF generation,
+  FxProperties endpoint binding)
+- ✅ Example APOs (`passthrough`, `gain`, `aec_scaffold`)
 
-Implementation will begin once the API design is reviewed and
-stabilised.
+CI covers Tier 1 (fmt, clippy, build/test), Tier 2 (multi-DLL export /
+dependency / signing verification), and Tier 3 (the COM lifecycle
+harness, including the AEC variant, plus an AddressSanitizer nightly).
+See [`architecture.md`](architecture.md) for the API design and
+[`testing.md`](testing.md) for the CI strategy.
 
 ## Target audience
 
