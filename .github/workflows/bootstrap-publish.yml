@@ -1,0 +1,100 @@
+# Bootstrap publish — one-shot manual workflow to push `tympan-apo`
+# v0.1.0 to crates.io.
+#
+# Exists solely to claim the crate name on crates.io. crates.io does
+# not yet support "pending publishers" (see release.yml's One-time
+# setup note), so the first version must be pushed with an API
+# token before the regular `release.yml` Trusted Publishing flow
+# can take over. The framework is Windows-only, so doing the
+# manual publish on a `windows-latest` runner is more reproducible
+# than asking the maintainer to find a Windows host.
+#
+# Intended lifecycle:
+#
+#   1. Maintainer adds the bootstrap API token as a repository
+#      secret `CARGO_REGISTRY_TOKEN_BOOTSTRAP` (scope: `publish-new`,
+#      short expiry).
+#   2. This workflow is run once via `workflow_dispatch` from the
+#      Actions tab on the GitHub UI.
+#   3. The job claims `tympan-apo` on crates.io.
+#   4. Maintainer configures the Trusted Publisher at
+#      https://crates.io/crates/tympan-apo/settings, revokes the
+#      bootstrap token, and removes the repository secret.
+#   5. A follow-up PR deletes this workflow file.
+#
+# From v0.2.0 onward only `release.yml` is used — it authenticates
+# via OIDC and needs no static token.
+
+name: Bootstrap publish (one-shot)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "publish" to confirm. Anything else aborts.'
+        required: true
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  # A second concurrent invocation would race for the same crate
+  # name; serialise just in case the trigger button is clicked
+  # twice in quick succession.
+  group: bootstrap-publish
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: short
+
+jobs:
+  publish:
+    name: Publish tympan-apo v0.1.0 (manual bootstrap)
+    runs-on: windows-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Guard against accidental dispatch
+        # The dispatch UI is a few clicks away from "publish the
+        # crate to the world". Require an explicit confirmation
+        # string so a stray button press cannot ship a version.
+        if: ${{ inputs.confirm != 'publish' }}
+        run: |
+          echo "::error::Confirmation input was not 'publish'. Aborting."
+          exit 1
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bootstrap-publish
+
+      - name: Show what we are about to publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name=="tympan-apo") | .version')
+          echo "Bootstrapping tympan-apo $VERSION on crates.io"
+
+      - name: cargo publish --dry-run
+        # Final safety check. Exercises the full publish path
+        # (manifest validation, `.crate` packaging, dependency
+        # resolution, full compile against the Windows SDK)
+        # without uploading.
+        run: cargo publish -p tympan-apo --dry-run
+
+      - name: cargo publish
+        env:
+          # Bootstrap API token, provided as a repository secret
+          # ahead of this run and removed immediately afterwards.
+          # The secret is masked in logs by GitHub Actions.
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN_BOOTSTRAP }}
+        run: cargo publish -p tympan-apo
