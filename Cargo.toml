@@ -1,15 +1,15 @@
 [package]
 name = "tympan-apo"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/penta2himajin/tympan-apo"
+documentation = "https://docs.rs/tympan-apo"
 description = "Rust framework for Windows Audio Processing Objects (APOs)"
 readme = "README.md"
 keywords = ["audio", "windows", "apo", "com", "realtime"]
 categories = ["multimedia::audio", "os::windows-apis"]
-publish = false
 
 # Library-only artefact. `register_apo!` emits the four `Dll*`
 # entry points from the user APO's crate root (e.g. the
