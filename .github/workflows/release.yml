@@ -1,0 +1,176 @@
+# Release workflow — publishes `tympan-apo` to crates.io.
+#
+# Trigger: a `v*.*.*` tag pushed to the repository. The tag's
+# numeric portion must match the framework crate's
+# `Cargo.toml#package.version`; a mismatch fails the preflight step
+# below before any side effects run.
+#
+# Authentication: crates.io Trusted Publishing (OIDC). The
+# `rust-lang/crates-io-auth-action@v1` step exchanges this
+# workflow's GitHub-issued OIDC ID token for a short-lived
+# (~15 min) crates.io access token, scoped to a single publish.
+# The token is auto-revoked when the job ends, so no long-lived
+# API token is stored as a GitHub secret.
+#
+# One-time setup (before the first release):
+#
+# crates.io does not yet support "pending publishers" — a Trusted
+# Publisher configuration can only be attached to a crate that
+# already exists. Per RFC 3691 (§ Guide-level explanation):
+# "A Trusted Publisher Configuration can only be created after an
+# initial manual publishing of a crate." The very first release
+# therefore needs a manual `cargo publish` with an API token;
+# subsequent releases are what this workflow automates.
+#
+#   1. crates.io → Account Settings → API Tokens → New Token
+#        Name:    something descriptive ("tympan-apo bootstrap")
+#        Scopes:  publish-new (least privilege)
+#        Expiry:  short — e.g. 1 day. The token is single-use here.
+#
+#   2. From a clean `main` checkout on a Windows host, publish
+#      v0.1.0 locally:
+#
+#        $env:CARGO_REGISTRY_TOKEN = 'cio_xxxxx...'
+#        cargo publish -p tympan-apo
+#        Remove-Item Env:\CARGO_REGISTRY_TOKEN
+#
+#      Or, equivalently from a POSIX shell that can cross-compile
+#      (rare for an APO project — typically a Windows host is
+#      used):
+#
+#        CARGO_REGISTRY_TOKEN='cio_xxxxx...' \
+#            cargo publish -p tympan-apo
+#
+#      The env-var form is preferred over `cargo login`: it leaves
+#      no trace in shell history or `~/.cargo/credentials.toml`.
+#
+#   3. Once the crate exists on crates.io, configure the Trusted
+#      Publisher:
+#
+#        https://crates.io/crates/tympan-apo/settings
+#        → Trusted Publishers section → Add
+#
+#      Fields:
+#        Repository owner    penta2himajin
+#        Repository name     tympan-apo
+#        Workflow filename   release.yml
+#        Environment         (leave blank)
+#
+#      Only direct crate owners can access this page. If you are a
+#      member of an owner team but not listed as an individual owner,
+#      see rust-lang/crates.io#12710 for the current workaround.
+#
+#   4. Revoke the bootstrap API token from
+#      crates.io → Account Settings → API Tokens → (token) → Revoke.
+#      The workflow below authenticates via OIDC from this point on;
+#      no long-lived token is needed.
+#
+#   5. Subsequent releases (v0.2.0 and beyond) only need a tag push —
+#      see "Release procedure" below.
+#
+# Note: do not push a `v0.1.0` tag *after* the manual first publish.
+# This workflow's preflight would pass, the dry-run would pass, and
+# the real publish would then fail with `crate version `0.1.0`
+# already uploaded`. Either start tagging from `v0.2.0`, or push
+# `v0.1.0` only for git-history purposes while accepting that the
+# `cargo publish` step will fail harmlessly.
+#
+# Release procedure:
+#
+#   1. Update `Cargo.toml#package.version` and commit on a branch.
+#   2. Merge the bump PR to `main`.
+#   3. From a clean `main` checkout:
+#        git tag vX.Y.Z
+#        git push origin vX.Y.Z
+#   4. This workflow fires; on success the new version is live on
+#      crates.io.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+  # Required for the OIDC token exchange with crates.io. Scoped to
+  # this workflow only; no other workflows in this repo request an
+  # ID token.
+  id-token: write
+
+concurrency:
+  # Serialise releases — two simultaneous `cargo publish` runs from
+  # the same crate would race and the loser would fail with
+  # `crate already uploaded`. The release tag is the natural lock
+  # key.
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: short
+
+jobs:
+  publish:
+    name: Publish tympan-apo to crates.io
+    # `windows-latest` matches the framework's Tier 1/2/3 runners so
+    # the publish-time `cargo publish --dry-run` (which compiles
+    # the packaged crate from scratch) exercises the Windows-only
+    # COM bridge in `src/raw/` and the `[target.'cfg(windows)']`
+    # `windows` / `windows-core` dependencies. Compiling on Linux
+    # would skip all of that.
+    runs-on: windows-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+
+      - name: Verify tag matches Cargo.toml version
+        # The release tag's numeric portion (`v0.1.0` → `0.1.0`)
+        # must equal the framework crate's manifest version. A
+        # mismatch is almost always either a missing version bump
+        # or a typo in the tag, and either way the release should
+        # not proceed.
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/v}"
+          VERSION=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name=="tympan-apo") | .version')
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "::error::tag v$TAG does not match Cargo.toml version $VERSION"
+            exit 1
+          fi
+          echo "Releasing tympan-apo $VERSION"
+
+      - name: cargo publish --dry-run
+        # Exercises the full publish path (manifest validation,
+        # `.crate` packaging, dependency resolution against
+        # crates.io's index, full compile of the packaged crate
+        # against the Windows SDK) without uploading. If this
+        # fails the real publish would fail too, and failing here
+        # costs nothing.
+        run: cargo publish -p tympan-apo --dry-run
+
+      - name: Obtain crates.io access token via Trusted Publishing
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: cargo publish
+        env:
+          # The action's output is a short-lived crates.io token;
+          # cargo reads it from this environment variable. The
+          # token is automatically revoked at end-of-job by the
+          # action's post step.
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish -p tympan-apo
