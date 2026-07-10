@@ -2,16 +2,16 @@ name: Tier 3 — AddressSanitizer
 
 # AddressSanitizer-enabled Tier 3 lifecycle run per
 # docs/decisions/0001-ci-verification-strategy.md § Tier 3.
-# Runs as a pre-release audit on `v*.*.*` tag pushes (the same
-# trigger as release.yml) and on manual dispatch. A daily schedule
-# was dropped: main rarely changes between releases, so nightly runs
-# produced only noise, not signal. ADR 0001 designates this as
-# non-blocking; it does not gate the release publish.
+# Runs on a daily schedule (one hour after the regular Tier 3) and
+# on manual dispatch. ADR 0001 designates this as non-blocking; a
+# failure on `main` opens an issue rather than reverting the PR.
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
+  schedule:
+    # 07:00 UTC daily — one hour after the regular Tier 3 cron so
+    # the cache is warm and we are unlikely to race on test runner
+    # capacity with the previous job.
+    - cron: "0 7 * * *"
   workflow_dispatch:
 
 permissions:
@@ -29,14 +29,6 @@ env:
   # nightly toolchain plus `-Zbuild-std` rebuilds the standard
   # library against the sanitizer, which is the recommended setup
   # on x86_64-pc-windows-msvc.
-  #
-  # NB: build-std must be spelled `-Z build-std=std,panic_abort`, not
-  # bare `-Z build-std`. Both our profiles set `panic = "abort"`
-  # (Cargo.toml). Without `panic_abort` in the build-std set, rustc
-  # can't find a self-built panic runtime, falls back to the sysroot
-  # `panic_abort`, which drags in the sysroot `core` — two `core`s,
-  # so `error[E0152]: duplicate lang item 'sized'`. See
-  # rust-lang/cargo#7359.
   RUSTFLAGS: "-Zsanitizer=address"
 
 jobs:
@@ -61,7 +53,7 @@ jobs:
           shared-key: tier3-asan
 
       - name: Build passthrough example cdylib with ASAN (release, -Zbuild-std)
-        run: cargo +nightly build -Z build-std=std,panic_abort --release --target x86_64-pc-windows-msvc --example passthrough
+        run: cargo +nightly build -Z build-std --release --target x86_64-pc-windows-msvc --example passthrough
 
       - name: Run Tier 3 lifecycle test under ASAN
         shell: pwsh
@@ -77,9 +69,9 @@ jobs:
             Write-Error "::error::Expected DLL not found at $env:TYMPAN_PASSTHROUGH_DLL"
             exit 1
           }
-          cargo +nightly test -Z build-std=std,panic_abort --release --target x86_64-pc-windows-msvc --test tier3_lifecycle -- --ignored --test-threads=1 --nocapture
+          cargo +nightly test -Z build-std --release --target x86_64-pc-windows-msvc --test tier3_lifecycle -- --ignored --test-threads=1 --nocapture
 
       - name: Run realtime-safety test under ASAN (rlib path + assert_no_alloc)
         env:
           ASAN_OPTIONS: "halt_on_error=1:abort_on_error=1:detect_stack_use_after_return=1"
-        run: cargo +nightly test -Z build-std=std,panic_abort --target x86_64-pc-windows-msvc --test realtime_safety -- --nocapture
+        run: cargo +nightly test -Z build-std --target x86_64-pc-windows-msvc --test realtime_safety -- --nocapture

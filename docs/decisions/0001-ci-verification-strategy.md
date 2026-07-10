@@ -121,11 +121,7 @@ Tier 2 plus:
   `IApoAcousticEchoCancellation` with a synthetic auxiliary input
   stream, gated behind the `aec` cargo feature.
 - An AddressSanitizer-enabled job (`RUSTFLAGS="-Zsanitizer=address"`,
-  nightly) running the same fixtures. It runs as a pre-release audit
-  on `v*.*.*` tag pushes and on manual dispatch — not on a daily
-  schedule, which produced noise rather than signal since `main`
-  rarely changes between releases. Non-blocking: it does not gate the
-  release publish.
+  nightly) running the same fixtures in parallel to the main job.
 
 This tier does not block PR merge but its failure on `main` opens an
 issue automatically (or notifies, depending on later infra choices).
