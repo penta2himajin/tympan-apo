@@ -118,7 +118,7 @@ impl ConnectionProperty {
 /// The Windows audio header (`audioenginebaseapo.h`) defines the
 /// constant via the four-character literal `'APOC'`, which MSVC
 /// evaluates as `0x4150_4F43`.
-pub const CONNECTION_PROPERTY_SIGNATURE: u32 = u32::from_be_bytes([b'A', b'P', b'O', b'C']);
+pub const CONNECTION_PROPERTY_SIGNATURE: u32 = u32::from_be_bytes(*b"APOC");
 
 #[cfg(windows)]
 impl From<windows::Win32::Media::Audio::Apo::APO_BUFFER_FLAGS> for BufferFlags {
